@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>专利策源台 · 历史记录</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="shell wide">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Generation History</p>
+          <h1>历史记录</h1>
+        </div>
+        <div class="top-actions">
+          <a class="button ghost" href="/">返回首页</a>
+          <button class="button ghost" id="refreshHistoryBtn">刷新记录</button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>最近十次生成</h2>
+            <p>每次生成完成后会自动保存 Markdown、Word 和相似专利差异分析文件。</p>
+          </div>
+          <span class="status-pill" id="historyState">准备读取</span>
+        </div>
+        <div id="historyList" class="history-list"></div>
+      </section>
+    </main>
+
+    <script>
+      const historyList = document.getElementById("historyList");
+      const historyState = document.getElementById("historyState");
+
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+        }[c]));
+      }
+
+      function formatTime(value) {
+        if (!value) return "-";
+        return value.replace("T", " ");
+      }
+
+      function artifactLinks(artifacts) {
+        const links = [
+          ["docx", "Word 文档"],
+          ["draft", "交互草稿"],
+          ["result", "result.md"],
+          ["similarity_markdown", "差异分析 Markdown"],
+          ["similarity_xlsx", "差异分析 Excel"],
+        ];
+        return links
+          .filter(([key]) => artifacts && artifacts[key])
+          .map(([key, label]) => `<a href="${artifacts[key]}" target="_blank">${label}</a>`)
+          .join("");
+      }
+
+      function renderRecords(records) {
+        if (!records.length) {
+          historyList.innerHTML = '<div class="empty">暂无历史生成记录。完成一次生成后会自动出现在这里。</div>';
+          return;
+        }
+        historyList.innerHTML = records.map((record, index) => {
+          const assessment = record.assessment || {};
+          const links = artifactLinks(record.artifacts);
+          return `
+            <article class="history-card">
+              <div class="history-rank">${index + 1}</div>
+              <div class="history-main">
+                <div class="history-title-row">
+                  <h2>${escapeHtml(record.title)}</h2>
+                  <span class="status-pill">${escapeHtml(record.agent_core || "-")}</span>
+                </div>
+                <div class="history-meta">
+                  <span>完成时间：${escapeHtml(formatTime(record.completed_at))}</span>
+                  <span>素材评分：${assessment.score ?? "-"} / 100</span>
+                  <span>${escapeHtml(assessment.level || "未评估")}</span>
+                  <span>候选方向：${record.candidate_count ?? 0}</span>
+                  <span>外部结果：${record.external_count ?? 0}</span>
+                </div>
+                ${record.search_topic ? `<p class="history-topic">检索主题：${escapeHtml(record.search_topic)}</p>` : ""}
+                <div class="history-detail-action">
+                  <a class="button ghost" href="${record.detail_url || `/history/${record.id}`}">查看完整过程</a>
+                </div>
+                <div class="artifact-row history-links">${links || "<span>暂无可下载文件</span>"}</div>
+              </div>
+            </article>
+          `;
+        }).join("");
+      }
+
+      async function loadHistory() {
+        historyState.textContent = "读取中";
+        historyList.innerHTML = '<div class="empty">正在读取历史记录...</div>';
+        try {
+          const res = await fetch("/api/history");
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "读取失败");
+          renderRecords(data.records || []);
+          historyState.textContent = "已读取";
+        } catch (err) {
+          historyState.textContent = "读取失败";
+          historyList.innerHTML = `<div class="empty danger">${escapeHtml(err)}</div>`;
+        }
+      }
+
+      document.getElementById("refreshHistoryBtn").addEventListener("click", loadHistory);
+      loadHistory();
+    </script>
+  </body>
+</html>

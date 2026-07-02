@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>专利策源台 · 系统设置</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="shell wide">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">System Configuration</p>
+          <h1>系统设置</h1>
+        </div>
+        <div class="top-actions">
+          <a class="button ghost" href="/">返回首页</a>
+          <button class="button ghost" id="refreshSettingsBtn">刷新配置</button>
+        </div>
+      </header>
+
+      <section class="summary-grid">
+        <div class="metric"><span>Agent 核</span><strong id="agentCore">-</strong></div>
+        <div class="metric"><span>Skills</span><strong id="skillCount">-</strong></div>
+        <div class="metric"><span>Tools</span><strong id="toolCount">-</strong></div>
+      </section>
+
+      <div class="settings-grid">
+        <section class="panel settings-preferences">
+          <div class="panel-head">
+            <div>
+              <h2>应用偏好</h2>
+              <p>这些设置保存在当前浏览器中，不影响知识库、Skills 或 Tools 的运行配置。</p>
+            </div>
+          </div>
+          <div class="preferences-list">
+            <label class="preference-row">
+              <span>
+                <strong>语言设置</strong>
+                <small>控制应用界面显示语言。</small>
+              </span>
+              <select id="languageSetting">
+                <option value="zh-CN">简体中文</option>
+                <option value="en-US">English</option>
+              </select>
+            </label>
+
+            <label class="preference-row">
+              <span>
+                <strong>主题颜色</strong>
+                <small>选择应用主色调。</small>
+              </span>
+              <select id="themeSetting">
+                <option value="green">深绿</option>
+                <option value="blue">深蓝</option>
+                <option value="graphite">石墨</option>
+                <option value="gold">金色</option>
+              </select>
+            </label>
+
+            <label class="preference-row">
+              <span>
+                <strong>界面密度</strong>
+                <small>控制列表和卡片间距。</small>
+              </span>
+              <select id="densitySetting">
+                <option value="comfortable">舒适</option>
+                <option value="compact">紧凑</option>
+              </select>
+            </label>
+
+            <label class="preference-row">
+              <span>
+                <strong>自动刷新配置</strong>
+                <small>进入设置页时自动读取最新 Skills 和 Tools。</small>
+              </span>
+              <input id="autoRefreshSetting" type="checkbox" />
+            </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>当前 Skills</h2>
+              <p>系统自动扫描项目中的 <code>skills/*/SKILL.md</code>。新增 Skill 后刷新即可显示。</p>
+            </div>
+          </div>
+          <div id="skillsList" class="registry-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>当前 Tools</h2>
+              <p>系统读取运行时工具注册表。后端使用 <code>@register_tool</code> 注册后会自动显示。</p>
+            </div>
+          </div>
+          <div id="toolsList" class="registry-list"></div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      }[c]));
+
+      async function loadSettings() {
+        const response = await fetch("/api/settings");
+        const data = await response.json();
+        document.getElementById("agentCore").textContent = data.agent_core || "-";
+        document.getElementById("skillCount").textContent = (data.skills || []).length;
+        document.getElementById("toolCount").textContent = (data.tools || []).length;
+        document.getElementById("skillsList").innerHTML = (data.skills || []).map((skill) => `
+          <article class="registry-item">
+            <div class="registry-head">
+              <strong>${escapeHtml(skill.name)}</strong>
+              <span>Skill</span>
+            </div>
+            <p>${escapeHtml(skill.description || "暂无描述")}</p>
+            <code>${escapeHtml(skill.path)}</code>
+          </article>
+        `).join("") || '<div class="empty">未发现项目 Skill。</div>';
+        document.getElementById("toolsList").innerHTML = (data.tools || []).map((tool) => `
+          <article class="registry-item">
+            <div class="registry-head">
+              <strong>${escapeHtml(tool.name)}</strong>
+              <span>${escapeHtml(tool.category)}</span>
+            </div>
+            <p>${escapeHtml(tool.description)}</p>
+            <code>${escapeHtml(tool.owner)}</code>
+          </article>
+        `).join("") || '<div class="empty">未发现注册 Tool。</div>';
+      }
+
+      const preferenceDefaults = {
+        language: "zh-CN",
+        theme: "green",
+        density: "comfortable",
+        autoRefresh: true
+      };
+
+      function readPreferences() {
+        try {
+          return { ...preferenceDefaults, ...JSON.parse(localStorage.getItem("patent_app_preferences") || "{}") };
+        } catch {
+          return { ...preferenceDefaults };
+        }
+      }
+
+      function savePreferences(preferences) {
+        localStorage.setItem("patent_app_preferences", JSON.stringify(preferences));
+      }
+
+      function applyPreferences(preferences) {
+        document.documentElement.lang = preferences.language;
+        document.body.dataset.theme = preferences.theme;
+        document.body.dataset.density = preferences.density;
+        document.getElementById("languageSetting").value = preferences.language;
+        document.getElementById("themeSetting").value = preferences.theme;
+        document.getElementById("densitySetting").value = preferences.density;
+        document.getElementById("autoRefreshSetting").checked = Boolean(preferences.autoRefresh);
+      }
+
+      function updatePreference(key, value) {
+        const preferences = { ...readPreferences(), [key]: value };
+        savePreferences(preferences);
+        applyPreferences(preferences);
+      }
+
+      document.getElementById("languageSetting").addEventListener("change", (event) => {
+        updatePreference("language", event.target.value);
+      });
+      document.getElementById("themeSetting").addEventListener("change", (event) => {
+        updatePreference("theme", event.target.value);
+      });
+      document.getElementById("densitySetting").addEventListener("change", (event) => {
+        updatePreference("density", event.target.value);
+      });
+      document.getElementById("autoRefreshSetting").addEventListener("change", (event) => {
+        updatePreference("autoRefresh", event.target.checked);
+      });
+
+      document.getElementById("refreshSettingsBtn").addEventListener("click", loadSettings);
+      const preferences = readPreferences();
+      applyPreferences(preferences);
+      if (preferences.autoRefresh) {
+        loadSettings();
+      }
+    </script>
+  </body>
+</html>

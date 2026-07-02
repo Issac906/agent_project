@@ -6,15 +6,15 @@ from models import TaskPlan
 
 
 TECH_DISCLOSURE_SECTIONS = [
-    "封面信息",
+    "标题页",
     "一、发明名称",
     "二、技术领域",
     "三、背景技术",
     "四、发明内容",
-    "五、附图说明",
-    "六、具体实施方式",
-    "七、权利要求书",
-    "附录：融合创新要素说明",
+    "五、保护范围",
+    "六、附图说明",
+    "七、具体实施方式",
+    "八、附图",
 ]
 
 TOPIC_ANALYSIS_SECTIONS = [
@@ -61,11 +61,11 @@ def route_task(user_task: str) -> TaskPlan:
 
     return TaskPlan(
         task_type="technical_disclosure",
-        title="专利技术交底书",
-        intent="撰写发明专利技术交底书初稿",
+        title="发明专利技术方案文档",
+        intent="撰写发明专利技术方案初稿",
         output_filename="technical_disclosure.md",
         required_sections=TECH_DISCLOSURE_SECTIONS,
-        suggested_queries=_queries(user_task, ["技术方案", "背景技术", "实施例", "权利要求"]),
+        suggested_queries=_queries(user_task, ["技术方案", "背景技术", "实施例", "保护范围"]),
     )
 
 

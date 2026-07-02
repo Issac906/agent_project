@@ -1,6 +1,6 @@
 # LightRAG 专利写作 Agent Workflow
 
-这是一个基于 LightRAG 知识库 API、外部检索和 Ollama 的交互式专利发现与写作 agent。它参考 `patent-writing` skill，把流程拆成：
+这是一个基于 LightRAG 知识库 API、外部检索、Pi coding agent、Skills 和 Tools 的交互式专利发现与写作 agent。当前默认模式不是把流程完全写死，而是启动一个 agent loop：先加载项目内 skills，再根据当前状态选择下一个工具，并在关键节点和用户交互。
 
 ```text
 读取知识库材料
@@ -22,26 +22,80 @@
 输出最终文档
 ```
 
-当前版本不再提供前端页面。默认运行 `python main.py` 会进入命令行交互流程。正式使用前仍需要在国家知识产权局专利检索及分析系统做人工检索核对。
+当前版本提供 Web 前端，也保留命令行交互流程。正式使用前仍需要在国家知识产权局专利检索及分析系统做人工检索核对。
+
+## Agent + Skills + Tools 架构
+
+### Skills
+
+启动时会加载：
+
+- `skills/patent-writing/SKILL.md`：项目内专利撰写主 skill，已从本地 `~/.codex/skills/patent-writing` 复制而来。
+- `skills/agent-planning/SKILL.md`：agent 决策规则。
+- `skills/material-assessment/SKILL.md`：素材充分性判断标准。
+- `skills/prior-art-analysis/SKILL.md`：相似专利差异分析标准。
+- `skills/interactive-drafting/SKILL.md`：分步骤写作和用户交互规则。
+- `skills/patent-quality-review/SKILL.md`：标题、背景问题链、创新点、有益效果证据和保护范围的强制验收标准。
+- `skills/formula-formatting/SKILL.md`：公式 LaTeX 源格式、变量定义、网页与 Word 展示标准。
+
+### Tools
+
+agent 可调用的工具包括：
+
+- `read_knowledge_base`：读取 LightRAG 文档和状态；
+- `assess_materials`：评估素材是否足够；
+- `external_search`：执行外部专利相关搜索；
+- `propose_candidates`：提出候选专利方向；
+- `analyze_similar_patents`：生成相似专利差异分析 Excel/Markdown；
+- `select_candidate`：让用户选择专利方向；
+- `draft_interactively`：逐章节生成技术交底书并与用户交互；
+- `review_patent_quality`：逐章检查并自动修订不合格内容，最终导出前再做全文复核；
+- `save_outputs`：保存最终文档。
+
+写作质量不再只依赖提示词。`patent_quality_tool.py` 会在章节生成、重写或修改后执行确定性检查；发现问题后，agent 根据检查结果自动修订并再次检查。网页会显示当前章节和最终文档的质量分及未解决项。
+
+项目中的 Skill 由 `agent_skill_loader.py` 自动扫描 `skills/*/SKILL.md`，Tool 通过 `@register_tool` 注册。首页“系统设置”页面会动态显示当前实际加载的全部 Skills 和 Tools。
+
+公式统一使用标准 LaTeX：行内 `$...$`、独立公式 `$$...$$`。网页通过 MathJax 渲染，Word 通过 `latex2mathml` 转换为原生 OMML 公式对象。
+
+### Agent Loop
+
+每轮 agent 会根据当前状态、已加载 skills 和工具列表选择下一步。当 `AGENT_CORE=pi_coding_agent` 时，planner、候选专利生成和章节写作会通过本机 `pi` 命令执行，并使用 Pi coding agent 中配置的 DeepSeek API；后端仍保留证据门槛，确保不会跳过知识库读取、外部检索、相似专利分析和用户选择这些关键步骤。
 
 ## 项目结构
 
 ```text
 .
 ├── main.py                 # 命令行入口
+├── app.py                  # Web 前端入口
 ├── patent_discovery_agent.py # 交互式专利发现与分步骤写作
+├── agent_skill_loader.py   # 加载项目内 skills
+├── pi_coding_agent_client.py # Pi coding agent 核调用封装
 ├── workflow.py             # 串联完整 agent workflow
 ├── config.py               # 读取 .env 配置
 ├── skill_router.py         # 根据任务判断输出类型
 ├── lightrag_client.py      # LightRAG Server API 客户端
 ├── writer.py               # 专利文档 Markdown 生成
+├── patent_quality_tool.py  # 专利章节与最终文档质量门禁
+├── formula_utils.py        # LaTeX 规范化、公式检查和 Word OMML 转换
+├── tool_registry.py        # 动态 Tool 注册表
 ├── evaluator.py            # 和 skill/示例章节对标检查
 ├── external_search.py      # 外部网页搜索 fallback
-├── llm_writer.py           # Ollama / LLM 最终写作
+├── llm_writer.py           # 历史兼容模块；当前 Web/CLI agent 默认不走它
 ├── similar_patent_analysis.py # 相似专利差异分析 Excel/Markdown 生成
 ├── models.py               # 数据模型
 ├── requirements.txt
 ├── .env.example
+├── templates/
+├── static/
+├── skills/
+│   ├── patent-writing/
+│   ├── agent-planning/
+│   ├── material-assessment/
+│   ├── prior-art-analysis/
+│   ├── interactive-drafting/
+│   ├── patent-quality-review/
+│   └── formula-formatting/
 └── outputs/
 ```
 
@@ -62,12 +116,15 @@ LIGHTRAG_QUERY_MODE=mix
 LIGHTRAG_TOP_K=
 LIGHTRAG_INCLUDE_CHUNK_CONTENT=true
 
-LLM_PROVIDER=ollama
-LLM_API_KEY=
-LLM_BASE_URL=http://192.168.130.130:9621
-LLM_MODEL=lightrag:latest
+AGENT_CORE=pi_coding_agent
+PI_CODING_COMMAND=pi
+PI_CODING_PROVIDER=deepseek
+PI_CODING_MODEL=deepseek-chat
+PI_CODING_TIMEOUT=600
 
-SEARCH_PROVIDER=duckduckgo
+SEARCH_PROVIDER=anysearch
+ANYSEARCH_BASE_URL=你的 AnySearch 搜索接口地址
+ANYSEARCH_TIMEOUT=10
 SEARCH_API_KEY=
 ```
 
@@ -80,21 +137,34 @@ SEARCH_API_KEY=
 - `LIGHTRAG_TOP_K` 是可选检索数量参数。如果你的 Swagger 不支持，先留空。
 - `LIGHTRAG_INCLUDE_CHUNK_CONTENT` 控制 references 是否尽量包含原始 chunk 内容，建议先保持 `true`。
 
-### 2. LLM 写作模型 API
+### 2. Agent 核选择
 
-这些变量用于调用 LLM 生成最终稿。当前已支持 Ollama 原生 `/api/generate`。
+默认建议使用 Pi coding agent：
 
-- `LLM_PROVIDER`：当前填 `ollama`。
-- `LLM_API_KEY`：Ollama 原生接口一般不需要 key，留空即可。
-- `LLM_BASE_URL`：Ollama 服务根地址。你当前可填 `http://192.168.130.130:9621`，不要加 `/api/generate`。
-- `LLM_MODEL`：具体模型名。你当前 `/api/tags` 返回 `lightrag:latest`。
+```bash
+AGENT_CORE=pi_coding_agent
+PI_CODING_COMMAND=pi
+PI_CODING_PROVIDER=deepseek
+PI_CODING_MODEL=deepseek-chat
+PI_CODING_TIMEOUT=600
+```
+
+- `AGENT_CORE=pi_coding_agent`：使用本机 Pi coding agent 作为 agent 核。
+- `PI_CODING_COMMAND`：Pi coding agent 命令名，通常是 `pi`。
+- `PI_CODING_PROVIDER`：当前使用 `deepseek`。
+- `PI_CODING_MODEL`：默认 `deepseek-chat`。
+- `PI_CODING_TIMEOUT`：单次 Pi 调用超时时间。
+
+DeepSeek 的 key/登录配置由 Pi coding agent 自己管理，本项目不单独配置 DeepSeek API。
 
 ### 3. 外部搜索 API
 
-当前默认使用 `duckduckgo`，不需要 key，但稳定性一般。
+当前推荐使用 `anysearch`，通过 API 做外部资料和相似专利检索；公共网页搜索只作为备用，不适合作为稳定生产能力。
 
-- `SEARCH_PROVIDER`：搜索服务商，例如 `duckduckgo`、`tavily`、`serpapi`、`bing`。
-- `SEARCH_API_KEY`：搜索服务商的 API key。DuckDuckGo 留空；Tavily/SerpAPI/Bing 才需要填。
+- `SEARCH_PROVIDER`：搜索服务商；当前填 `anysearch`。
+- `ANYSEARCH_BASE_URL`：AnySearch 搜索接口地址。如果官方给的是完整 `/search` 接口，直接填完整地址；如果填基础地址，程序会自动拼接 `/search`。
+- `ANYSEARCH_TIMEOUT`：AnySearch 单次请求超时时间，默认 `10` 秒。
+- `SEARCH_API_KEY`：AnySearch API key。
 
 ### 你现在最少需要填什么
 
@@ -105,13 +175,19 @@ LIGHTRAG_BASE_URL=你的 LightRAG Web UI 或 API 地址
 LIGHTRAG_API_KEY=如果 LightRAG 需要鉴权才填
 ```
 
-如果要调用你导师提供的 Ollama 写作：
+如果要用 Pi coding agent 作为 agent 核：
 
 ```bash
-LLM_PROVIDER=ollama
-LLM_API_KEY=
-LLM_BASE_URL=http://192.168.130.130:9621
-LLM_MODEL=lightrag:latest
+AGENT_CORE=pi_coding_agent
+PI_CODING_COMMAND=pi
+PI_CODING_PROVIDER=deepseek
+PI_CODING_MODEL=deepseek-chat
+```
+
+同时确保 Pi coding agent 能访问 DeepSeek API：
+
+```bash
+pi --provider deepseek --model deepseek-chat -p "hello"
 ```
 
 ## 安装依赖
@@ -134,6 +210,50 @@ python main.py --check
 - `GET /documents/status_counts`
 
 ## 运行 Workflow
+
+### Web 前端
+
+启动网页：
+
+```bash
+python app.py
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:5000
+```
+
+如果 5000 端口被占用，程序会自动换到 5001、5002 等可用端口，请以终端输出的地址为准。也可以在 `.env` 中指定：
+
+```bash
+WEB_PORT=5050
+```
+
+首页会简要展示知识库文档和处理状态，提供“刷新知识库”和“生成专利方案”两个操作。进入生成流程后，页面会按步骤推进知识库读取、素材评估、外部检索、候选专利、相似专利差异分析和分章节写作；需要用户确认的节点会在网页中显示选择、接受、重写、修改意见和手动编辑操作。
+
+### Docker 打包部署
+
+如果需要导出给公司服务器使用的 Docker tar 包，先确保本机已安装并启动 Docker，然后执行：
+
+```bash
+./scripts/build_docker_tar.sh
+```
+
+生成文件：
+
+```text
+patent-agent.tar
+```
+
+公司服务器部署步骤见：
+
+```text
+deploy/DOCKER_DEPLOY.md
+```
+
+镜像内会安装 Pi coding agent；公司服务器不需要预装 `pi`，但需要在运行时通过 `company.env` 配置 LightRAG 地址和 DeepSeek 凭据。
 
 ### 交互式专利发现流程
 

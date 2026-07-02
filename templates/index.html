@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>专利策源台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Patent Discovery Agent</p>
+          <h1>专利策源台</h1>
+        </div>
+        <div class="top-actions">
+          <a class="button ghost" href="/settings">系统设置</a>
+          <a class="button ghost" href="/history">历史记录</a>
+          <button class="button ghost" id="refreshBtn">刷新知识库</button>
+          <button class="button primary" id="startBtn">生成专利方案</button>
+        </div>
+      </header>
+
+      <section class="summary-grid">
+        <div class="metric">
+          <span>已处理文档</span>
+          <strong id="processedCount">-</strong>
+        </div>
+        <div class="metric">
+          <span>全部文档</span>
+          <strong id="allCount">-</strong>
+        </div>
+        <div class="metric">
+          <span>失败文档</span>
+          <strong id="failedCount">-</strong>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>知识库素材</h2>
+            <p>当前 agent 将基于这些材料提出专利方向，并结合外部检索做避重分析。</p>
+          </div>
+          <span class="status-pill" id="loadState">准备读取</span>
+        </div>
+        <div class="knowledge-tools">
+          <form id="uploadForm" class="upload-form">
+            <label class="file-picker">
+              <span>选择素材文件</span>
+              <input type="file" id="materialFile" name="file">
+            </label>
+            <button class="button primary" type="submit" id="uploadBtn">上传并扫描</button>
+          </form>
+          <div class="danger-actions">
+            <button class="button danger" id="deleteSelectedBtn" type="button" disabled>删除选中素材</button>
+            <button class="button danger" id="clearBtn" type="button">清空知识库</button>
+          </div>
+        </div>
+        <div id="toolMessage" class="tool-message hidden"></div>
+        <div id="documents" class="doc-list"></div>
+      </section>
+    </main>
+
+    <script>
+      const documentsEl = document.getElementById("documents");
+      const loadState = document.getElementById("loadState");
+      const processedCount = document.getElementById("processedCount");
+      const allCount = document.getElementById("allCount");
+      const failedCount = document.getElementById("failedCount");
+      const toolMessage = document.getElementById("toolMessage");
+      const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
+
+      function showMessage(text, type = "info") {
+        toolMessage.className = `tool-message ${type}`;
+        toolMessage.textContent = text;
+      }
+
+      function hideMessage() {
+        toolMessage.className = "tool-message hidden";
+        toolMessage.textContent = "";
+      }
+
+      function compact(text, max = 180) {
+        if (!text) return "暂无摘要";
+        return text.length > max ? `${text.slice(0, max)}...` : text;
+      }
+
+      async function loadKnowledge() {
+        loadState.textContent = "读取中";
+        documentsEl.innerHTML = '<div class="empty">正在读取知识库...</div>';
+        try {
+          const res = await fetch("/api/knowledge");
+          const data = await res.json();
+          const counts = data.counts.status_counts || {};
+          processedCount.textContent = counts.processed ?? "-";
+          allCount.textContent = counts.all ?? "-";
+          failedCount.textContent = counts.failed ?? "-";
+          loadState.textContent = "已连接";
+          if (!data.documents.length) {
+            documentsEl.innerHTML = '<div class="empty">暂无可用文档</div>';
+            return;
+          }
+          documentsEl.innerHTML = data.documents.map((doc) => `
+            <article class="doc-item">
+              <label class="doc-select">
+                <input type="checkbox" class="doc-checkbox" value="${escapeHtml(doc.id || "")}" ${doc.id ? "" : "disabled"}>
+                <span></span>
+              </label>
+              <div>
+                <div class="doc-title">${escapeHtml(doc.file_path)}</div>
+                <div class="doc-meta">
+                  <span>${escapeHtml(doc.status)}</span>
+                  <span>${doc.chunks_count || 0} chunks</span>
+                  ${doc.id ? `<span>ID: ${escapeHtml(doc.id)}</span>` : `<span>无可删除 ID</span>`}
+                </div>
+                <p>${escapeHtml(compact(doc.content_summary))}</p>
+              </div>
+            </article>
+          `).join("");
+          documentsEl.querySelectorAll(".doc-checkbox").forEach((checkbox) => {
+            checkbox.addEventListener("change", updateDeleteButton);
+          });
+          updateDeleteButton();
+        } catch (err) {
+          loadState.textContent = "读取失败";
+          documentsEl.innerHTML = `<div class="empty danger">${err}</div>`;
+        }
+      }
+
+      function selectedDocIds() {
+        return Array.from(document.querySelectorAll(".doc-checkbox:checked"))
+          .map((item) => item.value)
+          .filter(Boolean);
+      }
+
+      function updateDeleteButton() {
+        deleteSelectedBtn.disabled = selectedDocIds().length === 0;
+      }
+
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+        }[c]));
+      }
+
+      async function uploadMaterial(event) {
+        event.preventDefault();
+        const input = document.getElementById("materialFile");
+        const btn = document.getElementById("uploadBtn");
+        if (!input.files.length) {
+          showMessage("请选择一个文件。", "danger");
+          return;
+        }
+
+        const form = new FormData();
+        form.append("file", input.files[0]);
+        btn.disabled = true;
+        btn.textContent = "上传中";
+        showMessage("正在上传素材并触发 LightRAG 扫描。", "info");
+        try {
+          const res = await fetch("/api/knowledge/upload", { method: "POST", body: form });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "上传失败");
+          input.value = "";
+          showMessage(data.scan_error ? `上传成功，但扫描触发失败：${data.scan_error}` : "上传成功，LightRAG 已开始扫描处理。", data.scan_error ? "danger" : "success");
+          await loadKnowledge();
+        } catch (err) {
+          showMessage(`上传失败：${err}`, "danger");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "上传并扫描";
+        }
+      }
+
+      async function clearKnowledge() {
+        const confirmed = window.confirm("确认清空 LightRAG 知识库文档？该操作会删除当前知识库素材。");
+        if (!confirmed) return;
+        const btn = document.getElementById("clearBtn");
+        btn.disabled = true;
+        showMessage("正在清空知识库。", "info");
+        try {
+          const res = await fetch("/api/knowledge", { method: "DELETE" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "清空失败");
+          showMessage("知识库已清空。", "success");
+          await loadKnowledge();
+        } catch (err) {
+          showMessage(`清空失败：${err}`, "danger");
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      async function deleteSelectedDocuments() {
+        const docIds = selectedDocIds();
+        if (!docIds.length) {
+          showMessage("请选择要删除的素材。", "danger");
+          return;
+        }
+        const confirmed = window.confirm(`确认删除选中的 ${docIds.length} 个素材？`);
+        if (!confirmed) return;
+        deleteSelectedBtn.disabled = true;
+        showMessage("正在删除选中素材。", "info");
+        try {
+          const res = await fetch("/api/knowledge/documents", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ doc_ids: docIds, delete_file: true })
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "删除失败");
+          showMessage(`已删除 ${docIds.length} 个素材。`, "success");
+          await loadKnowledge();
+        } catch (err) {
+          showMessage(`删除失败：${err}`, "danger");
+        } finally {
+          updateDeleteButton();
+        }
+      }
+
+      async function startRun() {
+        const btn = document.getElementById("startBtn");
+        btn.disabled = true;
+        btn.textContent = "启动中";
+        try {
+          const res = await fetch("/api/runs", { method: "POST" });
+          const data = await res.json();
+          window.location.href = data.url;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "生成专利方案";
+        }
+      }
+
+      document.getElementById("uploadForm").addEventListener("submit", uploadMaterial);
+      deleteSelectedBtn.addEventListener("click", deleteSelectedDocuments);
+      document.getElementById("clearBtn").addEventListener("click", clearKnowledge);
+      document.getElementById("refreshBtn").addEventListener("click", loadKnowledge);
+      document.getElementById("startBtn").addEventListener("click", startRun);
+      loadKnowledge();
+    </script>
+  </body>
+</html>

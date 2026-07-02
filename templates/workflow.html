@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>专利策源台 · 生成流程</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script>
+      window.MathJax = {
+        tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]], displayMath: [["$$", "$$"], ["\\[", "\\]"]] },
+        options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  </head>
+  <body>
+    <main class="shell wide">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Interactive Workflow</p>
+          <h1>专利方案生成</h1>
+        </div>
+        <div class="top-actions">
+          <a class="button ghost" href="/">返回首页</a>
+          <span class="status-pill" id="runStatus">自动推进中</span>
+        </div>
+      </header>
+
+      <div class="workflow-grid">
+        <aside class="panel timeline-panel">
+          <div class="panel-head compact">
+            <div>
+              <h2>执行进度</h2>
+              <p id="phaseText">准备中</p>
+            </div>
+          </div>
+          <div id="timeline" class="timeline"></div>
+        </aside>
+
+        <section class="panel work-panel">
+          <div id="mainPanel"></div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const runId = "{{ run_id }}";
+      const runStatus = document.getElementById("runStatus");
+      const mainPanel = document.getElementById("mainPanel");
+      const timeline = document.getElementById("timeline");
+      const phaseText = document.getElementById("phaseText");
+      let state = null;
+      let busy = false;
+      let autoRunning = false;
+      let pendingSectionTransition = null;
+      let sectionBusyAction = null;
+
+      if (window.mermaid) {
+        mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "neutral" });
+      }
+
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+        }[c]));
+      }
+
+      function assessmentBlock(title, item) {
+        if (!item) return "";
+        const dimensions = item.dimensions || [];
+        return `
+          <div class="assessment">
+            <h3>${title}</h3>
+            <div class="score-line">
+              <strong>${item.score}/100</strong>
+              <span>${item.level}</span>
+            </div>
+            <div class="subscore">项目材料 ${item.project_score || 0}/75 · 专利避重 ${item.prior_art_score || 0}/25</div>
+            ${dimensions.length ? `
+              <div class="dimension-grid">
+                ${dimensions.map((dim) => `
+                  <div class="dimension-card ${dim.passed ? "passed" : "failed"}">
+                    <div class="dimension-head">
+                      <strong>${escapeHtml(dim.name)}</strong>
+                      <span>${dim.score}/${dim.max_score}</span>
+                    </div>
+                    <p>${escapeHtml(dim.evidence || "")}</p>
+                    ${dim.passed ? "" : `<em>${escapeHtml(dim.suggestion || "")}</em>`}
+                  </div>
+                `).join("")}
+              </div>
+            ` : `<ul>${(item.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`}
+            ${(item.capped_by || []).length ? `<div class="cap-list">${item.capped_by.map((cap) => `<p>封顶规则：${escapeHtml(cap)}</p>`).join("")}</div>` : ""}
+          </div>
+        `;
+      }
+
+      function qualityBlock(report, title = "写作质量检查") {
+        if (!report) return "";
+        const issues = report.issues || [];
+        return `
+          <div class="quality-panel ${report.passed ? "passed" : "failed"}">
+            <div class="quality-head">
+              <div>
+                <span>${escapeHtml(title)}</span>
+                <strong>${report.score}/100</strong>
+              </div>
+              <b>${report.passed ? "已通过" : "需要关注"}</b>
+            </div>
+            ${issues.length ? `
+              <div class="quality-issues">
+                ${issues.map((issue) => `
+                  <div>
+                    <strong>${escapeHtml(issue.message)}</strong>
+                    <p>${escapeHtml(issue.repair)}</p>
+                  </div>
+                `).join("")}
+              </div>
+            ` : `<p>标题、背景问题链、创新点位置、有益效果证据和保护范围检查均通过。</p>`}
+          </div>
+        `;
+      }
+
+      function inlineFormat(text) {
+        return escapeHtml(cleanInlineText(text))
+          .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+          .replace(/`([^`]+)`/g, "<code>$1</code>");
+      }
+
+      function cleanInlineText(text) {
+        return String(text || "")
+          .replace(/\\n/g, "\n")
+          .replace(/<!--[\s\S]*?-->/g, "")
+          .replace(/^[-*_]{3,}$/g, "")
+          .replace(/\*\*([^*]+)\*\*/g, "$1")
+          .replace(/`([^`]+)`/g, "$1")
+          .trim();
+      }
+
+      function cleanHeadingText(text) {
+        return cleanInlineText(text).replace(/^#+\s*/, "").replace(/^\*+|\*+$/g, "").trim();
+      }
+
+      function renderMarkdown(markdown) {
+        const lines = String(markdown || "").replace(/\\n/g, "\n").split(/\r?\n/);
+        const blocks = [];
+        let list = [];
+        let code = [];
+        let inCode = false;
+        let codeLang = "";
+        let inFormula = false;
+        let formula = [];
+
+        function flushList() {
+          if (!list.length) return;
+          blocks.push(`<ul>${list.map((item) => `<li>${inlineFormat(item)}</li>`).join("")}</ul>`);
+          list = [];
+        }
+
+        function flushCode() {
+          const content = code.join("\n").trim();
+          if (codeLang === "mermaid" && content) {
+            blocks.push(`<div class="diagram-card"><div class="mermaid">${escapeHtml(content)}</div></div>`);
+          } else if (content) {
+            blocks.push(`<pre class="code-block">${escapeHtml(content)}</pre>`);
+          }
+          code = [];
+          codeLang = "";
+        }
+
+        for (const rawLine of lines) {
+          const line = rawLine.trimEnd();
+          if (line.trim() === "$$") {
+            flushList();
+            if (inFormula) {
+              blocks.push(`<div class="formula-block">\\[${escapeHtml(formula.join("\n").trim())}\\]</div>`);
+              formula = [];
+              inFormula = false;
+            } else {
+              inFormula = true;
+            }
+            continue;
+          }
+          if (inFormula) {
+            formula.push(line);
+            continue;
+          }
+          const singleFormula = line.trim().match(/^\$\$(.+)\$\$$/);
+          if (singleFormula) {
+            flushList();
+            blocks.push(`<div class="formula-block">\\[${escapeHtml(singleFormula[1].trim())}\\]</div>`);
+            continue;
+          }
+          const fence = line.match(/^```(\w+)?/);
+          if (fence) {
+            if (inCode) {
+              inCode = false;
+              flushCode();
+            } else {
+              flushList();
+              inCode = true;
+              codeLang = (fence[1] || "").toLowerCase();
+            }
+            continue;
+          }
+          if (inCode) {
+            code.push(line);
+            continue;
+          }
+          if (!line.trim()) {
+            flushList();
+            continue;
+          }
+          const heading = line.match(/^(#{1,6})\s*(.+)$/);
+          if (heading) {
+            flushList();
+            const level = Math.min(heading[1].length + 1, 5);
+            blocks.push(`<h${level}>${inlineFormat(cleanHeadingText(heading[2]))}</h${level}>`);
+            continue;
+          }
+          const bullet = line.match(/^[-*]\s+(.+)$/) || line.match(/^\d+[.、]\s+(.+)$/);
+          if (bullet) {
+            list.push(bullet[1]);
+            continue;
+          }
+          flushList();
+          const cleaned = cleanInlineText(line.replace(/^>+\s*/, ""));
+          if (cleaned) {
+            blocks.push(`<p>${inlineFormat(cleaned)}</p>`);
+          }
+        }
+        flushList();
+        if (inCode) flushCode();
+        if (formula.length) {
+          blocks.push(`<div class="formula-block">\\[${escapeHtml(formula.join("\n").trim())}\\]</div>`);
+        }
+        return blocks.join("");
+      }
+
+      function parseCandidate(raw) {
+        const fields = {};
+        String(raw || "").split(/\r?\n/).forEach((line) => {
+          const match = line.match(/^\s*([^：:]{2,12})[：:]\s*(.+)$/);
+          if (match) fields[match[1].trim()] = match[2].trim();
+        });
+        return fields;
+      }
+
+      function candidateCard(item, index) {
+        const fields = parseCandidate(item.raw || item.summary);
+        const rows = [
+          ["核心方案", fields["核心方案"]],
+          ["创新点", fields["创新点"]],
+          ["避让现有技术", fields["避让现有技术"]],
+          ["素材充分性", fields["素材充分性"]],
+        ].filter(([, value]) => value);
+        return `
+          <label class="candidate-card">
+            <input type="radio" name="candidate" value="${index}" ${index === 0 ? "checked" : ""}>
+            <div>
+              <strong>${escapeHtml(item.title)}</strong>
+              <div class="candidate-summary">
+                ${rows.length ? rows.map(([label, value]) => `
+                  <div><span>${label}</span><p>${inlineFormat(value)}</p></div>
+                `).join("") : `<p>${inlineFormat(item.summary || item.raw || "")}</p>`}
+              </div>
+            </div>
+          </label>
+        `;
+      }
+
+      function renderTimeline() {
+        timeline.innerHTML = (state.events || []).map((event) => `
+          <div class="timeline-item">
+            <div class="dot"></div>
+            <div>
+              <strong>${escapeHtml(event.title)}</strong>
+              <p>${escapeHtml(event.detail)}</p>
+            </div>
+          </div>
+        `).join("") || '<div class="empty">尚未开始执行</div>';
+      }
+
+      function renderCandidatePanel() {
+        return `
+          <div class="section-head">
+            <h2>选择专利方向</h2>
+            <p>已生成候选方向和相似专利差异分析。请选择一个方向继续写作，也可以手动输入新方向。</p>
+          </div>
+          <div class="artifact-row">
+            ${state.artifacts.similarity_markdown ? `<a href="${state.artifacts.similarity_markdown}" target="_blank">查看差异分析 Markdown</a>` : ""}
+            ${state.artifacts.similarity_xlsx ? `<a href="${state.artifacts.similarity_xlsx}" target="_blank">打开 Excel</a>` : ""}
+          </div>
+          <div class="candidate-list">
+            ${state.candidates.map(candidateCard).join("")}
+          </div>
+          <label class="field">
+            <span>或手动输入专利名称</span>
+            <input id="customTitle" placeholder="留空则使用上方选择">
+          </label>
+          <button class="button primary" onclick="selectCandidate()">确认方向并开始写作</button>
+        `;
+      }
+
+      function renderSectionPanel() {
+        const section = state.section || {};
+        const isLoadingNext = pendingSectionTransition && !state.waiting_for && !state.done;
+        const isSectionBusy = Boolean(sectionBusyAction);
+        const displaySection = isLoadingNext ? pendingSectionTransition.section : section;
+        const index = isLoadingNext ? pendingSectionTransition.index : (section.index || 0);
+        const busyText = sectionBusyAction === "rewrite"
+          ? "正在重写本章"
+          : sectionBusyAction === "revise"
+            ? "正在根据修改意见重写"
+            : sectionBusyAction === "manual"
+              ? "正在保存手动编辑"
+              : sectionBusyAction === "accept"
+                ? "正在确认本章"
+                : sectionBusyAction === "quit"
+                  ? "正在结束并保存"
+                  : "正在处理当前章节";
+        return `
+          <div class="section-head">
+            <div>
+              <h2>${escapeHtml(displaySection.name || "章节")}</h2>
+              <p>第 ${index + 1} / ${section.total || displaySection.total || 0} 步。${isLoadingNext ? "本章已确认，正在生成下一章。" : isSectionBusy ? "Agent 正在处理当前操作，请等待结果返回。" : "确认后进入下一章。"}</p>
+            </div>
+          </div>
+          ${isLoadingNext ? `<div class="section-loading"><div class="spinner"></div><div><strong>正在生成下一章</strong><p>请稍等，完成后页面会自动切换到下一部分。</p></div></div>` : ""}
+          ${isSectionBusy ? `<div class="section-loading"><div class="spinner"></div><div><strong>${busyText}</strong><p>请不要重复点击，完成后本章内容会自动刷新。</p></div></div>` : ""}
+          ${isLoadingNext || isSectionBusy ? "" : qualityBlock(section.quality, "本章质量检查")}
+          <div class="markdown-box markdown-body ${isLoadingNext ? "is-confirmed" : ""} ${isSectionBusy ? "is-processing" : ""}">${renderMarkdown(displaySection.content || "")}</div>
+          <div class="action-row ${isLoadingNext ? "hidden" : ""}">
+            <button class="button primary" onclick="sectionAction('accept')" ${isSectionBusy ? "disabled" : ""}>接受并继续</button>
+            <button class="button ghost" onclick="sectionAction('rewrite')" ${isSectionBusy ? "disabled" : ""}>重写本章</button>
+            <button class="button ghost" onclick="toggleBox('reviseBox')" ${isSectionBusy ? "disabled" : ""}>提修改意见</button>
+            <button class="button ghost" onclick="toggleBox('manualBox')" ${isSectionBusy ? "disabled" : ""}>手动编辑</button>
+            <button class="button danger" onclick="sectionAction('quit')" ${isSectionBusy ? "disabled" : ""}>结束并保存</button>
+          </div>
+          <div class="edit-box ${sectionBusyAction === "revise" ? "" : "hidden"}" id="reviseBox">
+            <label class="field">
+              <span>修改意见</span>
+              <textarea id="instruction" rows="4" placeholder="例如：加强技术效果，减少泛泛表述"></textarea>
+            </label>
+            <button class="button primary" onclick="sectionAction('revise')" ${isSectionBusy ? "disabled" : ""}>按意见修改</button>
+          </div>
+          <div class="edit-box ${sectionBusyAction === "manual" ? "" : "hidden"}" id="manualBox">
+            <label class="field">
+              <span>手动替换本章内容</span>
+              <textarea id="manualContent" rows="12">${escapeHtml(section.content || "")}</textarea>
+            </label>
+            <button class="button primary" onclick="sectionAction('manual')" ${isSectionBusy ? "disabled" : ""}>替换并接受</button>
+          </div>
+        `;
+      }
+
+      function renderWritingLoadingPanel() {
+        const lastSection = pendingSectionTransition?.section || state.last_confirmed_section;
+        const nextName = state.next_section_name || "下一部分";
+        if (!lastSection) {
+          return `
+            <div class="section-head">
+              <div>
+                <h2>开始分章节写作</h2>
+                <p>已确认专利方向，正在生成第一部分：${escapeHtml(nextName)}。</p>
+              </div>
+            </div>
+            <div class="section-loading"><div class="spinner"></div><div><strong>正在生成 ${escapeHtml(nextName)}</strong><p>页面会在生成完成后直接切换到该部分。</p></div></div>
+            <div class="writing-context">
+              <span>已选择方向</span>
+              <strong>${escapeHtml(state.selected_candidate?.title || "")}</strong>
+            </div>
+          `;
+        }
+        return `
+          <div class="section-head">
+            <div>
+              <h2>${escapeHtml(lastSection.name || "已确认章节")}</h2>
+              <p>第 ${(lastSection.index || 0) + 1} / ${lastSection.total || state.section?.total || 0} 步已确认，正在生成：${escapeHtml(nextName)}。</p>
+            </div>
+          </div>
+          <div class="section-loading"><div class="spinner"></div><div><strong>正在生成 ${escapeHtml(nextName)}</strong><p>请稍等，完成后页面会直接切换到下一部分。</p></div></div>
+          <div class="markdown-box markdown-body is-confirmed">${renderMarkdown(lastSection.content || "")}</div>
+        `;
+      }
+
+      function renderOverview() {
+        const docs = state.knowledge?.documents || [];
+        return `
+          <div class="section-head">
+            <h2>当前状态</h2>
+            <p>系统正在按知识库读取、素材评估、外部检索、候选生成、差异分析和分章节写作自动推进。需要你判断时会停下来。</p>
+          </div>
+          ${busy ? `<div class="running-card"><div class="spinner"></div><div><strong>正在执行下一步</strong><p>页面会自动切换到需要确认的节点。</p></div></div>` : ""}
+          <div class="summary-grid small">
+            <div class="metric"><span>Agent 核</span><strong>${escapeHtml(state.agent_core)}</strong></div>
+            <div class="metric"><span>知识库文档</span><strong>${docs.length}</strong></div>
+            <div class="metric"><span>外部结果</span><strong>${state.external?.results?.length || 0}</strong></div>
+          </div>
+          ${state.search_round ? `<div class="note"><strong>自动检索轮次：</strong>第 ${state.search_round} 轮，未达标时会继续自动补充检索。</div>` : ""}
+          ${assessmentBlock("素材初评", state.initial_assessment)}
+          ${assessmentBlock("检索后复评", state.assessment)}
+          ${state.search_topic ? `<div class="note"><strong>检索主题：</strong>${escapeHtml(state.search_topic)}</div>` : ""}
+          ${state.error ? `<div class="empty danger">${escapeHtml(state.error)}</div>` : ""}
+        `;
+      }
+
+      function renderDone() {
+        return `
+          <div class="section-head">
+            <h2>最终文档已生成</h2>
+            <p>结果已经保存到 outputs，可继续查看或返回首页重新生成。</p>
+          </div>
+          <div class="artifact-row">
+            ${state.artifacts.docx ? `<a href="${state.artifacts.docx}" target="_blank">下载 Word 文档</a>` : ""}
+            ${state.artifacts.draft ? `<a href="${state.artifacts.draft}" target="_blank">查看交互式草稿</a>` : ""}
+            ${state.artifacts.result ? `<a href="${state.artifacts.result}" target="_blank">查看 result.md</a>` : ""}
+            ${state.artifacts.similarity_markdown ? `<a href="${state.artifacts.similarity_markdown}" target="_blank">差异分析 Markdown</a>` : ""}
+            ${state.artifacts.similarity_xlsx ? `<a href="${state.artifacts.similarity_xlsx}" target="_blank">差异分析 Excel</a>` : ""}
+          </div>
+          ${qualityBlock(state.final_quality, "最终文档质量检查")}
+        `;
+      }
+
+      function render() {
+        phaseText.textContent = state.phase;
+        runStatus.textContent = sectionBusyAction ? "章节处理中" : state.waiting_for ? "等待确认" : state.done ? "已完成" : "自动推进中";
+        renderTimeline();
+        mainPanel.classList.add("is-switching");
+        window.setTimeout(() => mainPanel.classList.remove("is-switching"), 180);
+        if (state.waiting_for === "candidate") {
+          pendingSectionTransition = null;
+          mainPanel.innerHTML = renderCandidatePanel();
+        } else if (state.waiting_for === "section") {
+          pendingSectionTransition = null;
+          mainPanel.innerHTML = renderSectionPanel();
+        } else if (state.done) {
+          pendingSectionTransition = null;
+          mainPanel.innerHTML = renderDone();
+        } else if (state.selected_candidate) {
+          mainPanel.innerHTML = renderWritingLoadingPanel();
+        } else {
+          mainPanel.innerHTML = renderOverview();
+        }
+        renderDiagrams();
+      }
+
+      async function loadState() {
+        const res = await fetch(`/api/runs/${runId}`);
+        state = await res.json();
+        render();
+      }
+
+      async function advance() {
+        if (busy) return;
+        busy = true;
+        runStatus.textContent = "执行中";
+        render();
+        try {
+          const res = await fetch(`/api/runs/${runId}/advance`, { method: "POST" });
+          state = await res.json();
+        } finally {
+          busy = false;
+          render();
+        }
+      }
+
+      async function runUntilHumanInput() {
+        if (autoRunning) return;
+        autoRunning = true;
+        while (state && (!state.waiting_for || state.waiting_for === "material") && !state.done && !state.error) {
+          await advance();
+          await new Promise((resolve) => setTimeout(resolve, 320));
+        }
+        autoRunning = false;
+      }
+
+      async function selectCandidate() {
+        const selected = document.querySelector('input[name="candidate"]:checked');
+        const customTitle = document.getElementById("customTitle").value;
+        const res = await fetch(`/api/runs/${runId}/select`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ index: selected ? selected.value : null, custom_title: customTitle })
+        });
+        state = await res.json();
+        render();
+        runUntilHumanInput();
+      }
+
+      async function sectionAction(action) {
+        if (sectionBusyAction) return;
+        const instruction = document.getElementById("instruction")?.value || "";
+        const content = document.getElementById("manualContent")?.value || "";
+        sectionBusyAction = action;
+        if (["accept", "manual"].includes(action)) {
+          pendingSectionTransition = {
+            section: { ...(state.section || {}), content: action === "manual" && content ? content : state.section?.content },
+            index: state.section?.index || 0,
+          };
+        }
+        render();
+        try {
+          const res = await fetch(`/api/runs/${runId}/section`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, instruction, content })
+          });
+          state = await res.json();
+        } finally {
+          sectionBusyAction = null;
+          render();
+        }
+        if (!["rewrite", "revise"].includes(action)) {
+          runUntilHumanInput();
+        }
+      }
+
+      function toggleBox(id) {
+        if (sectionBusyAction) return;
+        document.getElementById(id)?.classList.toggle("hidden");
+      }
+
+      async function renderDiagrams() {
+        if (window.mermaid) {
+          try {
+            await mermaid.run({ querySelector: ".mermaid" });
+          } catch (err) {
+            console.warn("Mermaid render failed", err);
+          }
+        }
+        if (window.MathJax?.typesetPromise) {
+          try {
+            await MathJax.typesetPromise([mainPanel]);
+          } catch (err) {
+            console.warn("MathJax render failed", err);
+          }
+        }
+      }
+
+      loadState().then(runUntilHumanInput);
+    </script>
+  </body>
+</html>

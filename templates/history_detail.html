@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>专利策源台 · 历史详情</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script>
+      window.MathJax = {
+        tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]], displayMath: [["$$", "$$"], ["\\[", "\\]"]] },
+        options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+  </head>
+  <body>
+    <main class="shell wide">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Generation Record</p>
+          <h1 id="recordTitle">历史详情</h1>
+        </div>
+        <div class="top-actions">
+          <a class="button ghost" href="/history">返回历史记录</a>
+          <a class="button ghost" href="/">返回首页</a>
+        </div>
+      </header>
+
+      <section class="panel history-detail-panel">
+        <div id="recordContent"><div class="empty">正在读取完整过程...</div></div>
+      </section>
+    </main>
+
+    <script>
+      const recordId = "{{ record_id }}";
+      const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      }[c]));
+
+      function markdownText(value) {
+        const formulas = [];
+        const source = String(value || "").replace(/\$\$([\s\S]*?)\$\$/g, (_, formula) => {
+          const token = `FORMULA_BLOCK_${formulas.length}_TOKEN`;
+          formulas.push(`<div class="formula-block">\\[${escapeHtml(formula.trim())}\\]</div>`);
+          return token;
+        });
+        let rendered = escapeHtml(source)
+          .replace(/^### (.+)$/gm, "<h4>$1</h4>")
+          .replace(/^## (.+)$/gm, "<h3>$1</h3>")
+          .replace(/^# (.+)$/gm, "<h2>$1</h2>")
+          .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+          .replace(/\n/g, "<br>");
+        formulas.forEach((formula, index) => {
+          rendered = rendered.replace(`FORMULA_BLOCK_${index}_TOKEN`, formula);
+        });
+        return rendered;
+      }
+
+      function candidateCards(record) {
+        const selected = record.selected_candidate?.title;
+        return (record.candidates || []).map((item, index) => `
+          <article class="history-process-card ${item.title === selected ? "selected" : ""}">
+            <div class="registry-head">
+              <strong>${index + 1}. ${escapeHtml(item.title)}</strong>
+              ${item.title === selected ? "<span>用户选择</span>" : "<span>候选</span>"}
+            </div>
+            <div class="history-rich-text">${markdownText(item.raw || item.summary)}</div>
+          </article>
+        `).join("") || '<div class="empty">旧记录未保存候选专利详情。</div>';
+      }
+
+      function interactionCards(record) {
+        return (record.interactions || []).map((item, index) => {
+          const payload = item.payload || {};
+          return `
+            <article class="interaction-entry">
+              <div class="interaction-index">${index + 1}</div>
+              <div>
+                <div class="interaction-head">
+                  <strong>${escapeHtml(item.title)}</strong>
+                  <span>${escapeHtml((item.timestamp || "").replace("T", " "))}</span>
+                </div>
+                ${payload.section_name ? `<p>章节：${escapeHtml(payload.section_name)}</p>` : ""}
+                ${payload.action ? `<p>操作：${escapeHtml(payload.action)}</p>` : ""}
+                ${interactionPayload(item)}
+              </div>
+            </article>
+          `;
+        }).join("") || '<div class="empty">该旧记录只保存了结果摘要，没有完整交互过程。</div>';
+      }
+
+      function interactionPayload(item) {
+        const payload = item.payload || {};
+        const blocks = [];
+        if (payload.score !== undefined) {
+          blocks.push(`<p>评估结果：${payload.score}/100，${escapeHtml(payload.level || "")}</p>`);
+        }
+        if (payload.topic) {
+          blocks.push(`<p>检索主题：${escapeHtml(payload.topic)}</p>`);
+        }
+        if (payload.documents?.length) {
+          blocks.push(`<div class="interaction-data-list">${payload.documents.map((doc) =>
+            `<span>${escapeHtml(doc.file_path)} · ${doc.chunks_count || 0} chunks</span>`
+          ).join("")}</div>`);
+        }
+        if (payload.results?.length) {
+          blocks.push(`<div class="interaction-data-list">${payload.results.map((result) =>
+            `<span>${escapeHtml(result.title || "检索结果")}</span>`
+          ).join("")}</div>`);
+        }
+        if (payload.candidates?.length) {
+          blocks.push(`<div class="interaction-data-list">${payload.candidates.map((candidate, index) =>
+            `<span>${index + 1}. ${escapeHtml(candidate.title)}</span>`
+          ).join("")}</div>`);
+        }
+        if (payload.selected?.title) {
+          blocks.push(`<p>选择结果：${escapeHtml(payload.selected.title)}</p>`);
+        }
+        if (payload.instruction) {
+          blocks.push(`<div class="interaction-instruction"><strong>用户意见</strong><p>${escapeHtml(payload.instruction)}</p></div>`);
+        }
+        if (payload.content) {
+          blocks.push(`<div class="history-rich-text">${markdownText(payload.content)}</div>`);
+        }
+        if (payload.quality) {
+          blocks.push(`<p>质量检查：${payload.quality.score ?? "-"} / 100，${payload.quality.passed ? "通过" : "存在待处理项"}</p>`);
+        }
+        return blocks.join("");
+      }
+
+      function artifactLinks(artifacts) {
+        return Object.entries({
+          docx: "Word 文档",
+          draft: "交互草稿",
+          result: "result.md",
+          similarity_markdown: "差异分析 Markdown",
+          similarity_xlsx: "差异分析 Excel"
+        }).filter(([key]) => artifacts?.[key]).map(([key, label]) =>
+          `<a href="${artifacts[key]}" target="_blank">${label}</a>`
+        ).join("");
+      }
+
+      function citationSection(record) {
+        const citations = record.citations || {};
+        const knowledge = citations.knowledge || [];
+        const external = citations.external || [];
+        if (!knowledge.length && !external.length) {
+          return '<div class="empty">该旧记录未保存引用说明。</div>';
+        }
+        return `
+          <div class="history-process-grid">
+            <article class="history-process-card">
+              <div class="registry-head">
+                <strong>知识库引用</strong>
+                <span>${knowledge.length} 条</span>
+              </div>
+              <div class="interaction-data-list">
+                ${knowledge.map((item) => `
+                  <span>${escapeHtml(item.id)} · ${escapeHtml(item.document)}：${escapeHtml(item.quoted_content || "无摘要")}</span>
+                `).join("")}
+              </div>
+            </article>
+            <article class="history-process-card">
+              <div class="registry-head">
+                <strong>外部检索引用</strong>
+                <span>${external.length} 条</span>
+              </div>
+              ${citations.search_topic ? `<p>检索主题：${escapeHtml(citations.search_topic)}</p>` : ""}
+              <div class="interaction-data-list">
+                ${external.map((item) => `
+                  <span>${escapeHtml(item.id)} · ${escapeHtml(item.title)}：${escapeHtml(item.quoted_content || "无摘要")}</span>
+                `).join("")}
+              </div>
+            </article>
+          </div>
+        `;
+      }
+
+      async function loadRecord() {
+        const response = await fetch(`/api/history/${recordId}`);
+        const record = await response.json();
+        document.getElementById("recordTitle").textContent = record.title || "历史详情";
+        document.getElementById("recordContent").innerHTML = `
+          <div class="history-detail-summary">
+            <div><span>开始时间</span><strong>${escapeHtml((record.created_at || "-").replace("T", " "))}</strong></div>
+            <div><span>完成时间</span><strong>${escapeHtml((record.completed_at || "-").replace("T", " "))}</strong></div>
+            <div><span>Agent 核</span><strong>${escapeHtml(record.agent_core || "-")}</strong></div>
+            <div><span>最终选择</span><strong>${escapeHtml(record.selected_candidate?.title || record.title || "-")}</strong></div>
+          </div>
+          <section class="history-detail-section">
+            <h2>候选专利 Ideas</h2>
+            <div class="history-process-grid">${candidateCards(record)}</div>
+          </section>
+          <section class="history-detail-section">
+            <h2>完整交互过程</h2>
+            <div class="interaction-list">${interactionCards(record)}</div>
+          </section>
+          <section class="history-detail-section">
+            <h2>已确认章节</h2>
+            ${(record.accepted_sections || []).map((section) => `
+              <details class="history-section-detail">
+                <summary>${escapeHtml(section.name)}</summary>
+                <div class="history-rich-text">${markdownText(section.content)}</div>
+              </details>
+            `).join("") || '<div class="empty">该记录未保存章节过程。</div>'}
+          </section>
+          <section class="history-detail-section">
+            <h2>引用说明</h2>
+            ${citationSection(record)}
+          </section>
+          <section class="history-detail-section">
+            <h2>结果文件</h2>
+            <div class="artifact-row">${artifactLinks(record.artifacts) || "暂无文件"}</div>
+          </section>
+        `;
+        if (window.MathJax?.typesetPromise) {
+          await MathJax.typesetPromise([document.getElementById("recordContent")]);
+        }
+      }
+
+      loadRecord();
+    </script>
+  </body>
+</html>

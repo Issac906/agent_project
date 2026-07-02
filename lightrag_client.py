@@ -40,6 +40,45 @@ class LightRAGClient:
         """Return document processing status counts."""
         return self._request("GET", "/documents/status_counts")
 
+    def upload_document(self, file_obj: Any, filename: str) -> Any:
+        """Upload a document file to LightRAG input directory."""
+        files = {"file": (filename, file_obj)}
+        try:
+            return self._request("POST", "/documents/upload", files=files)
+        except LightRAGClientError as exc:
+            if "HTTP 错误: 400" not in str(exc) and "HTTP 错误: 422" not in str(exc):
+                raise
+            file_obj.seek(0)
+            return self._request("POST", "/documents/upload", files={"upload_file": (filename, file_obj)})
+
+    def scan_documents(self) -> Any:
+        """Ask LightRAG to scan input directory for new documents."""
+        return self._request("POST", "/documents/scan", allow_empty=True)
+
+    def clear_documents(self) -> Any:
+        """Clear documents from the LightRAG knowledge base."""
+        return self._request("DELETE", "/documents", allow_empty=True)
+
+    def delete_documents(
+        self,
+        doc_ids: list[str],
+        delete_file: bool = True,
+        delete_llm_cache: bool = False,
+    ) -> Any:
+        """Delete selected documents by LightRAG document IDs."""
+        if not doc_ids:
+            raise LightRAGClientError("请选择至少一个要删除的文档。")
+        return self._request(
+            "DELETE",
+            "/documents/delete_document",
+            json={
+                "doc_ids": doc_ids,
+                "delete_file": delete_file,
+                "delete_llm_cache": delete_llm_cache,
+            },
+            allow_empty=True,
+        )
+
     def query(self, question: str) -> Any:
         """Ask the knowledge base a question."""
         try:
@@ -83,7 +122,7 @@ class LightRAGClient:
 
         return payload
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    def _request(self, method: str, path: str, allow_empty: bool = False, **kwargs: Any) -> Any:
         url = f"{self.base_url}{path}"
         headers = kwargs.pop("headers", {})
         headers.setdefault("Accept", "application/json")
@@ -114,6 +153,8 @@ class LightRAGClient:
             raise LightRAGClientError(f"LightRAG API 请求失败: {exc}") from exc
 
         if not response.content:
+            if allow_empty:
+                return {"ok": True}
             raise LightRAGClientError("LightRAG API 返回内容为空。")
 
         try:
@@ -124,6 +165,8 @@ class LightRAGClient:
             ) from exc
 
         if data in (None, "", [], {}):
+            if allow_empty:
+                return {"ok": True}
             raise LightRAGClientError("LightRAG API 返回 JSON 内容为空。")
 
         return data
