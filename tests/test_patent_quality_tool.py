@@ -79,6 +79,9 @@ class PatentQualityToolTests(unittest.TestCase):
             r"## 七、具体实施方式\n目标函数为 \frac{a}{b}。",
         )
         self.assertIn("malformed_formula", [issue.code for issue in report.issues])
+        formula_issue = next(issue for issue in report.issues if issue.code == "malformed_formula")
+        self.assertNotIn("$...$", formula_issue.repair)
+        self.assertNotIn("$$...$$", formula_issue.repair)
 
     def test_process_metadata_is_rejected_and_stripped(self) -> None:
         content = """## 二、技术领域

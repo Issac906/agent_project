@@ -21,6 +21,7 @@
 
       <section class="summary-grid">
         <div class="metric"><span>Agent 核</span><strong id="agentCore">-</strong></div>
+        <div class="metric"><span>内部 LLM</span><strong id="internalLlm">-</strong></div>
         <div class="metric"><span>Skills</span><strong id="skillCount">-</strong></div>
         <div class="metric"><span>Tools</span><strong id="toolCount">-</strong></div>
       </section>
@@ -110,6 +111,7 @@
         const response = await fetch("/api/settings");
         const data = await response.json();
         document.getElementById("agentCore").textContent = data.agent_core || "-";
+        document.getElementById("internalLlm").textContent = data.internal_llm || "-";
         document.getElementById("skillCount").textContent = (data.skills || []).length;
         document.getElementById("toolCount").textContent = (data.tools || []).length;
         document.getElementById("skillsList").innerHTML = (data.skills || []).map((skill) => `

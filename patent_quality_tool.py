@@ -113,7 +113,7 @@ def review_section(
             QualityIssue(
                 "malformed_formula",
                 message,
-                "把公式改为标准 LaTeX：行内使用 $...$，独立公式使用 $$...$$，并在公式后定义变量。",
+                "把公式改为标准 LaTeX：行内公式使用成对单美元定界符，独立公式使用成对双美元定界符，并在公式后定义变量。",
             )
         )
 

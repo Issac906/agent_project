@@ -69,6 +69,60 @@
         `).join("") || '<div class="empty">旧记录未保存候选专利详情。</div>';
       }
 
+      function materialStrategySection(record) {
+        const strategy = record.material_strategy;
+        if (!strategy) {
+          return '<div class="empty">该旧记录未保存素材分层与组合路径。</div>';
+        }
+        const layers = strategy.layers || [];
+        const paths = strategy.candidate_paths || [];
+        return `
+          <div class="material-map">
+            <div class="material-map-head">
+              <div>
+                <h3>素材分层与组合依据</h3>
+                <p>${escapeHtml(strategy.summary || "系统已按材料用途完成分层。")}</p>
+                ${strategy.external_usage_boundary ? `<p><strong>${escapeHtml(strategy.external_usage_boundary)}</strong></p>` : ""}
+              </div>
+            </div>
+            <div class="material-layer-grid">
+              ${layers.map((layer) => `
+                <article class="material-layer-card">
+                  <div class="registry-head">
+                    <strong>${escapeHtml(layer.name)}</strong>
+                    <span>${layer.knowledge_count || 0} 知识库 / ${layer.external_count || 0} 外部</span>
+                  </div>
+                  <p>${escapeHtml(layer.role || "")}</p>
+                  <div class="material-source-list">
+                    ${(layer.knowledge_items || []).slice(0, 3).map((item) => `<span>知识库：${escapeHtml(item.title)}</span>`).join("")}
+                    ${(layer.external_items || []).slice(0, 2).map((item) => `<span>外部：${escapeHtml(item.title)}</span>`).join("")}
+                  </div>
+                </article>
+              `).join("")}
+            </div>
+            ${(strategy.combination_rules || []).length ? `
+              <div class="combination-rules">
+                ${(strategy.combination_rules || []).map((rule) => `<p>${escapeHtml(rule)}</p>`).join("")}
+              </div>
+            ` : ""}
+            ${paths.length ? `
+              <div class="candidate-path-list">
+                <h3>候选 idea 的素材组合路径</h3>
+                ${paths.map((path) => `
+                  <article class="candidate-path-card">
+                    <strong>${path.candidate_index}. ${escapeHtml(path.title)}</strong>
+                    <p>${escapeHtml(path.idea_rationale || "")}</p>
+                    <div class="path-tags">
+                      ${(path.source_layers || []).map((layer) => `<span>${escapeHtml(layer.name)}</span>`).join("")}
+                    </div>
+                  </article>
+                `).join("")}
+              </div>
+            ` : ""}
+          </div>
+        `;
+      }
+
       function interactionCards(record) {
         return (record.interactions || []).map((item, index) => {
           const payload = item.payload || {};
@@ -187,6 +241,10 @@
             <div><span>Agent 核</span><strong>${escapeHtml(record.agent_core || "-")}</strong></div>
             <div><span>最终选择</span><strong>${escapeHtml(record.selected_candidate?.title || record.title || "-")}</strong></div>
           </div>
+          <section class="history-detail-section">
+            <h2>Idea 生成前的素材组合图谱</h2>
+            ${materialStrategySection(record)}
+          </section>
           <section class="history-detail-section">
             <h2>候选专利 Ideas</h2>
             <div class="history-process-grid">${candidateCards(record)}</div>

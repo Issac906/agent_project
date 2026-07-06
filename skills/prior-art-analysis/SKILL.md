@@ -9,6 +9,27 @@ description: Use this skill when comparing candidate patent ideas with public se
 
 For each candidate patent direction, compare it against external search results and produce a structured difference analysis.
 
+## External Search Usage Boundary
+
+AnySearch and other external search results are prior-art and background materials, not invention sources.
+
+External search results may only be used to:
+
+- supplement domain background;
+- identify existing technologies;
+- extract non-reusable technical feature combinations;
+- check novelty and inventive-step risk;
+- guide technical avoidance when generating or revising ideas.
+
+External search results must not be directly reused as the core innovation of a new patent idea.
+
+When generating or reviewing each candidate idea, explicitly state:
+
+- which existing technical feature combinations are not reused;
+- what new technical features distinguish the candidate from existing patents;
+- whether the claimed technical effect is caused by the new technical features;
+- which parts still carry overlap risk and require human confirmation.
+
 ## Required Columns
 
 - 公开号

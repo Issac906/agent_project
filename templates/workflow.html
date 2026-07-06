@@ -100,7 +100,7 @@
         if (!report) return "";
         const issues = report.issues || [];
         return `
-          <div class="quality-panel ${report.passed ? "passed" : "failed"}">
+          <div class="quality-panel ${report.passed ? "passed" : "failed"}" data-no-mathjax>
             <div class="quality-head">
               <div>
                 <span>${escapeHtml(title)}</span>
@@ -112,14 +112,22 @@
               <div class="quality-issues">
                 ${issues.map((issue) => `
                   <div>
-                    <strong>${escapeHtml(issue.message)}</strong>
-                    <p>${escapeHtml(issue.repair)}</p>
+                    <strong>${escapeHtml(plainQualityText(issue.message))}</strong>
+                    <p>${escapeHtml(plainQualityText(issue.repair))}</p>
                   </div>
                 `).join("")}
               </div>
             ` : `<p>标题、背景问题链、创新点位置、有益效果证据和保护范围检查均通过。</p>`}
           </div>
         `;
+      }
+
+      function plainQualityText(text) {
+        return String(text || "")
+          .replace(/\$\$\.{3}\$\$/g, "独立公式块")
+          .replace(/\$\.{3}\$/g, "行内公式")
+          .replace(/\$\$/g, "独立公式定界符")
+          .replace(/\$/g, "行内公式定界符");
       }
 
       function inlineFormat(text) {
@@ -253,6 +261,11 @@
           ["核心方案", fields["核心方案"]],
           ["创新点", fields["创新点"]],
           ["避让现有技术", fields["避让现有技术"]],
+          ["未复用已有技术特征", fields["未复用已有技术特征"]],
+          ["新技术特征", fields["新技术特征"]],
+          ["技术效果来源", fields["技术效果来源"]],
+          ["重合风险", fields["重合风险"]],
+          ["人工确认点", fields["人工确认点"]],
           ["素材充分性", fields["素材充分性"]],
         ].filter(([, value]) => value);
         return `
@@ -267,6 +280,57 @@
               </div>
             </div>
           </label>
+        `;
+      }
+
+      function materialStrategyBlock(strategy) {
+        if (!strategy) return "";
+        const layers = strategy.layers || [];
+        const paths = strategy.candidate_paths || [];
+        return `
+          <section class="material-map">
+            <div class="material-map-head">
+              <div>
+                <h3>素材分层与组合依据</h3>
+                <p>${escapeHtml(strategy.summary || "系统已按材料用途完成分层。")}</p>
+                ${strategy.external_usage_boundary ? `<p><strong>${escapeHtml(strategy.external_usage_boundary)}</strong></p>` : ""}
+              </div>
+            </div>
+            <div class="material-layer-grid">
+              ${layers.map((layer) => `
+                <article class="material-layer-card">
+                  <div class="registry-head">
+                    <strong>${escapeHtml(layer.name)}</strong>
+                    <span>${layer.knowledge_count || 0} 知识库 / ${layer.external_count || 0} 外部</span>
+                  </div>
+                  <p>${escapeHtml(layer.role || "")}</p>
+                  <div class="material-source-list">
+                    ${(layer.knowledge_items || []).slice(0, 3).map((item) => `<span>知识库：${escapeHtml(item.title)}</span>`).join("")}
+                    ${(layer.external_items || []).slice(0, 2).map((item) => `<span>外部：${escapeHtml(item.title)}</span>`).join("")}
+                  </div>
+                </article>
+              `).join("")}
+            </div>
+            ${(strategy.combination_rules || []).length ? `
+              <div class="combination-rules">
+                ${(strategy.combination_rules || []).map((rule) => `<p>${escapeHtml(rule)}</p>`).join("")}
+              </div>
+            ` : ""}
+            ${paths.length ? `
+              <div class="candidate-path-list">
+                <h3>候选 idea 的素材组合路径</h3>
+                ${paths.map((path) => `
+                  <article class="candidate-path-card">
+                    <strong>${path.candidate_index}. ${escapeHtml(path.title)}</strong>
+                    <p>${escapeHtml(path.idea_rationale || "")}</p>
+                    <div class="path-tags">
+                      ${(path.source_layers || []).map((layer) => `<span>${escapeHtml(layer.name)}</span>`).join("")}
+                    </div>
+                  </article>
+                `).join("")}
+              </div>
+            ` : ""}
+          </section>
         `;
       }
 
@@ -292,6 +356,7 @@
             ${state.artifacts.similarity_markdown ? `<a href="${state.artifacts.similarity_markdown}" target="_blank">查看差异分析 Markdown</a>` : ""}
             ${state.artifacts.similarity_xlsx ? `<a href="${state.artifacts.similarity_xlsx}" target="_blank">打开 Excel</a>` : ""}
           </div>
+          ${materialStrategyBlock(state.material_strategy)}
           <div class="candidate-list">
             ${state.candidates.map(candidateCard).join("")}
           </div>
@@ -399,6 +464,7 @@
             <div class="metric"><span>外部结果</span><strong>${state.external?.results?.length || 0}</strong></div>
           </div>
           ${state.search_round ? `<div class="note"><strong>自动检索轮次：</strong>第 ${state.search_round} 轮，未达标时会继续自动补充检索。</div>` : ""}
+          ${materialStrategyBlock(state.material_strategy)}
           ${assessmentBlock("素材初评", state.initial_assessment)}
           ${assessmentBlock("检索后复评", state.assessment)}
           ${state.search_topic ? `<div class="note"><strong>检索主题：</strong>${escapeHtml(state.search_topic)}</div>` : ""}
@@ -532,7 +598,9 @@
         }
         if (window.MathJax?.typesetPromise) {
           try {
-            await MathJax.typesetPromise([mainPanel]);
+            await MathJax.typesetPromise(
+              Array.from(mainPanel.querySelectorAll(":scope > *:not([data-no-mathjax])"))
+            );
           } catch (err) {
             console.warn("MathJax render failed", err);
           }

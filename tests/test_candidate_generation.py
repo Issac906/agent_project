@@ -37,6 +37,12 @@ class CandidateGenerationTests(unittest.TestCase):
         self.assertEqual(5, len(candidates))
         self.assertEqual("铝电解槽阳极效应早期预警方法", candidates[0].title)
         self.assertTrue(all(candidate.title for candidate in candidates))
+        fallback_raw = candidates[1].raw
+        self.assertIn("未复用已有技术特征", fallback_raw)
+        self.assertIn("新技术特征", fallback_raw)
+        self.assertIn("技术效果来源", fallback_raw)
+        self.assertIn("重合风险", fallback_raw)
+        self.assertIn("人工确认点", fallback_raw)
 
 
 if __name__ == "__main__":

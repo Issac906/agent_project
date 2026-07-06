@@ -23,6 +23,7 @@ from docx_exporter import export_markdown_to_docx
 from external_search import ExternalSearchResult, search_external_materials
 from formula_utils import normalize_formula_markdown
 from lightrag_client import LightRAGClient, LightRAGClientError
+from material_strategy import build_material_strategy
 from patent_discovery_agent import (
     WRITING_STEPS,
     MaterialAssessment,
@@ -99,6 +100,7 @@ class WebPatentRun:
         self.base_search_topic = ""
         self.search_round = 0
         self.external: ExternalSearchResult | None = None
+        self.material_strategy: dict[str, Any] | None = None
         self.candidates: list[PatentCandidate] = []
         self.selected_candidate: PatentCandidate | None = None
         self.similarity_xlsx: Path | None = None
@@ -232,6 +234,17 @@ class WebPatentRun:
                 return
 
             if self.phase == "reassessed":
+                self.material_strategy = build_material_strategy(
+                    self._knowledge_documents_json(),
+                    self._external(),
+                    [],
+                )
+                self.add_event("素材分层", self.material_strategy.get("summary", "已完成素材分层。"))
+                self.add_interaction(
+                    "material_strategy",
+                    "生成 idea 前的素材分层",
+                    self.material_strategy,
+                )
                 self.candidates = _generate_candidates(
                     self.config,
                     self.material_text,
@@ -239,12 +252,20 @@ class WebPatentRun:
                     self._external(),
                     skill_instructions=self.skill_prompt,
                 )
+                self.material_strategy = build_material_strategy(
+                    self._knowledge_documents_json(),
+                    self._external(),
+                    self.candidates,
+                )
                 self.phase = "candidates_ready"
                 self.add_event("候选专利方向", f"已生成 {len(self.candidates)} 个候选方向。")
                 self.add_interaction(
                     "candidates",
                     "生成候选专利方向",
-                    {"candidates": [asdict(item) for item in self.candidates]},
+                    {
+                        "candidates": [asdict(item) for item in self.candidates],
+                        "material_strategy": self.material_strategy,
+                    },
                 )
                 return
 
@@ -445,6 +466,7 @@ class WebPatentRun:
                 "results": self.external.results if self.external else [],
                 "text": _format_search_results(self.external) if self.external else "",
             },
+            "material_strategy": self.material_strategy,
             "candidates": [
                 {"title": item.title, "summary": item.summary, "raw": item.raw}
                 for item in self.candidates
@@ -901,6 +923,7 @@ def api_settings() -> Any:
     return jsonify(
         {
             "agent_core": config.agent_core,
+            "internal_llm": _internal_llm_label(config),
             "skills": [
                 {
                     "name": skill.name,
@@ -912,6 +935,16 @@ def api_settings() -> Any:
             "tools": [tool.to_dict() for tool in registered_tools()],
         }
     )
+
+
+def _internal_llm_label(config: AppConfig) -> str:
+    if config.agent_core in {"pi", "pi_coding", "pi_coding_agent", "pi-coding-agent"}:
+        return f"{config.pi_provider}/{config.pi_model or 'default'}"
+    if config.agent_core in {"codex", "codex_cli", "codex-cli"}:
+        return f"codex/{config.codex_model or 'default'}"
+    if config.llm_provider and config.llm_provider != "none":
+        return f"{config.llm_provider}/{config.llm_model or 'default'}"
+    return "未配置独立 LLM"
 
 
 @app.route("/outputs/<path:filename>")
@@ -948,8 +981,35 @@ def load_history_record(record_id: str) -> dict[str, Any] | None:
             data = json.loads(detail_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        return data if isinstance(data, dict) else None
-    return next((item for item in load_history_records() if item.get("id") == safe_id), None)
+        return _with_material_strategy(data) if isinstance(data, dict) else None
+    summary = next((item for item in load_history_records() if item.get("id") == safe_id), None)
+    return _with_material_strategy(summary) if summary else None
+
+
+def _with_material_strategy(record: dict[str, Any]) -> dict[str, Any]:
+    if record.get("material_strategy"):
+        return record
+    knowledge = record.get("knowledge") or {}
+    external = record.get("external") or {}
+    candidates = [
+        PatentCandidate(
+            title=str(item.get("title") or "未命名候选"),
+            summary=str(item.get("summary") or ""),
+            raw=str(item.get("raw") or ""),
+        )
+        for item in (record.get("candidates") or [])
+        if isinstance(item, dict)
+    ]
+    record["material_strategy"] = build_material_strategy(
+        documents=knowledge.get("documents") or [],
+        external=ExternalSearchResult(
+            enabled=True,
+            notes=external.get("notes") or [],
+            results=external.get("results") or [],
+        ),
+        candidates=candidates,
+    )
+    return record
 
 
 @register_tool("save_generation_history", "保存最近十次生成记录及完整交互过程快照。", "History")
@@ -1000,6 +1060,7 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
             "notes": run.external.notes if run.external else [],
             "results": run.external.results if run.external else [],
         },
+        "material_strategy": run.material_strategy,
         "citations": run.citation_report,
         "candidates": [asdict(item) for item in run.candidates],
         "selected_candidate": asdict(run.selected_candidate) if run.selected_candidate else None,

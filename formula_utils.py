@@ -47,15 +47,15 @@ def formula_issues(markdown: str) -> list[str]:
         issues.append("公式包含 Unicode 替换字符，可能已经发生编码损坏。")
     display_count = text.count("$$")
     if display_count % 2:
-        issues.append("块级公式的 $$ 定界符数量不成对。")
+        issues.append("块级公式的双美元定界符数量不成对。")
     without_display = re.sub(r"\$\$.*?\$\$", "", text, flags=re.DOTALL)
     inline_count = len(re.findall(r"(?<!\\)\$", without_display))
     if inline_count % 2:
-        issues.append("行内公式的 $ 定界符数量不成对。")
+        issues.append("行内公式的单美元定界符数量不成对。")
     if re.search(r"```(?:latex|tex|math)", text, flags=re.IGNORECASE):
         issues.append("公式不应放在 Markdown 代码围栏中。")
     if re.search(r"(?<![$\\])\\(?:frac|sum|sqrt|mathbf|mathrm|begin)\b", without_display):
-        issues.append("检测到未被 $ 或 $$ 包裹的 LaTeX 公式。")
+        issues.append("检测到未被公式定界符包裹的 LaTeX 公式。")
     return issues
 
 
