@@ -49,10 +49,11 @@
       function artifactLinks(artifacts) {
         const links = [
           ["docx", "Word 文档"],
-          ["draft", "交互草稿"],
-          ["result", "result.md"],
-          ["similarity_markdown", "差异分析 Markdown"],
+          ["result", "最终 Markdown"],
+          ["draft", "交互草稿 Markdown"],
           ["similarity_xlsx", "差异分析 Excel"],
+          ["similarity_markdown", "差异分析 Markdown"],
+          ["token_usage_report", "Token 报告"],
         ];
         return links
           .filter(([key]) => artifacts && artifacts[key])

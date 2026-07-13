@@ -80,6 +80,63 @@
           </div>
         </section>
 
+        <section class="panel settings-runtime">
+          <div class="panel-head">
+            <div>
+              <h2>运行时 API 配置</h2>
+              <p>这些配置保存在当前用户电脑中，不会写入项目 <code>.env</code>，也不会被打进安装包。</p>
+            </div>
+          </div>
+          <div class="runtime-config-grid">
+            <label class="config-field">
+              <span>外部搜索 Provider</span>
+              <select id="cfgSearchProvider">
+                <option value="search_api">Search API</option>
+                <option value="duckduckgo">内置公开检索 fallback</option>
+              </select>
+            </label>
+            <label class="config-field">
+              <span>外部搜索 API Key</span>
+              <input id="cfgSearchApiKey" type="password" autocomplete="new-password" placeholder="留空则不修改已有 key" />
+              <small id="cfgSearchApiKeyHint"></small>
+            </label>
+            <label class="config-field">
+              <span>外部搜索 API 地址</span>
+              <input id="cfgSearchBaseUrl" type="url" placeholder="https://.../api" />
+            </label>
+            <label class="config-field">
+              <span>Agent 核</span>
+              <select id="cfgAgentCore">
+                <option value="pi_coding_agent">Pi Coding Agent</option>
+                <option value="codex_cli">Codex CLI</option>
+                <option value="ollama">Ollama / fallback</option>
+              </select>
+            </label>
+            <label class="config-field">
+              <span>Pi 命令</span>
+              <input id="cfgPiCommand" type="text" placeholder="pi" />
+            </label>
+            <label class="config-field">
+              <span>Pi Provider</span>
+              <input id="cfgPiProvider" type="text" placeholder="provider 名称" />
+            </label>
+            <label class="config-field">
+              <span>Pi Model</span>
+              <input id="cfgPiModel" type="text" placeholder="模型名称" />
+            </label>
+            <label class="config-field">
+              <span>Pi Agent LLM API Key</span>
+              <input id="cfgPiAgentApiKey" type="password" autocomplete="new-password" placeholder="留空则不修改已有 key" />
+              <small id="cfgPiAgentApiKeyHint"></small>
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button class="button primary" id="saveRuntimeConfigBtn">保存 API 配置</button>
+            <span id="runtimeConfigStatus" class="status-text"></span>
+          </div>
+          <p class="config-path">配置文件位置：<code id="runtimeConfigPath">-</code></p>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <div>
@@ -114,6 +171,7 @@
         document.getElementById("internalLlm").textContent = data.internal_llm || "-";
         document.getElementById("skillCount").textContent = (data.skills || []).length;
         document.getElementById("toolCount").textContent = (data.tools || []).length;
+        applyRuntimeConfig(data.user_config || {});
         document.getElementById("skillsList").innerHTML = (data.skills || []).map((skill) => `
           <article class="registry-item">
             <div class="registry-head">
@@ -134,6 +192,62 @@
             <code>${escapeHtml(tool.owner)}</code>
           </article>
         `).join("") || '<div class="empty">未发现注册 Tool。</div>';
+      }
+
+      function applyRuntimeConfig(userConfig) {
+        const values = userConfig.values || {};
+        const secrets = userConfig.secrets || {};
+        document.getElementById("cfgSearchProvider").value = values.SEARCH_PROVIDER || "search_api";
+        document.getElementById("cfgSearchBaseUrl").value = values.SEARCH_BASE_URL || values.SEARCH_ENDPOINT || values.ANYSEARCH_BASE_URL || values.ANYSEARCH_ENDPOINT || "";
+        document.getElementById("cfgAgentCore").value = values.AGENT_CORE || "pi_coding_agent";
+        document.getElementById("cfgPiCommand").value = values.PI_CODING_COMMAND || "pi";
+        document.getElementById("cfgPiProvider").value = values.PI_CODING_PROVIDER || "";
+        document.getElementById("cfgPiModel").value = values.PI_CODING_MODEL || "";
+        document.getElementById("runtimeConfigPath").textContent = userConfig.path || "-";
+        document.getElementById("cfgSearchApiKeyHint").textContent = secrets.SEARCH_API_KEY?.configured ? `已配置：${secrets.SEARCH_API_KEY.masked}` : "未配置";
+        document.getElementById("cfgPiAgentApiKeyHint").textContent = secrets.PI_AGENT_API_KEY?.configured ? `已配置：${secrets.PI_AGENT_API_KEY.masked}` : "未配置";
+      }
+
+      function readRuntimeConfigForm() {
+        const payload = {
+          SEARCH_PROVIDER: document.getElementById("cfgSearchProvider").value,
+          SEARCH_BASE_URL: document.getElementById("cfgSearchBaseUrl").value,
+          AGENT_CORE: document.getElementById("cfgAgentCore").value,
+          PI_CODING_COMMAND: document.getElementById("cfgPiCommand").value,
+          PI_CODING_PROVIDER: document.getElementById("cfgPiProvider").value,
+          PI_CODING_MODEL: document.getElementById("cfgPiModel").value
+        };
+        const searchKey = document.getElementById("cfgSearchApiKey").value.trim();
+        const piAgentKey = document.getElementById("cfgPiAgentApiKey").value.trim();
+        if (searchKey) payload.SEARCH_API_KEY = searchKey;
+        if (piAgentKey) payload.PI_AGENT_API_KEY = piAgentKey;
+        return payload;
+      }
+
+      async function saveRuntimeConfig() {
+        const button = document.getElementById("saveRuntimeConfigBtn");
+        const status = document.getElementById("runtimeConfigStatus");
+        button.disabled = true;
+        status.textContent = "正在保存...";
+        try {
+          const response = await fetch("/api/settings/runtime", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(readRuntimeConfigForm())
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "保存失败");
+          document.getElementById("cfgSearchApiKey").value = "";
+          document.getElementById("cfgPiAgentApiKey").value = "";
+          applyRuntimeConfig(data.user_config || {});
+          document.getElementById("agentCore").textContent = data.agent_core || "-";
+          document.getElementById("internalLlm").textContent = data.internal_llm || "-";
+          status.textContent = "已保存，后续生成会使用这套配置。";
+        } catch (error) {
+          status.textContent = error.message || "保存失败";
+        } finally {
+          button.disabled = false;
+        }
       }
 
       const preferenceDefaults = {
@@ -185,6 +299,7 @@
       });
 
       document.getElementById("refreshSettingsBtn").addEventListener("click", loadSettings);
+      document.getElementById("saveRuntimeConfigBtn").addEventListener("click", saveRuntimeConfig);
       const preferences = readPreferences();
       applyPreferences(preferences);
       if (preferences.autoRefresh) {

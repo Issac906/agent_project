@@ -4,6 +4,12 @@ __pycache__/
 *.py[cod]
 
 .DS_Store
+*.spec
+.pyinstaller-cache/
+build/
+dist/
+*.dmg
+*.exe
 
 outputs/*.md
 !outputs/.gitkeep

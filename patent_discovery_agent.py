@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable
 
 from agent_skill_loader import LoadedSkill, format_skills_for_prompt, load_agent_skills
@@ -12,6 +13,7 @@ from config import AppConfig
 from codex_cli_client import CodexCLIError, generate_text_with_codex_cli
 from external_search import ExternalSearchResult, search_external_materials
 from formula_utils import normalize_formula_markdown
+from knowledge_graph import build_knowledge_graph, format_knowledge_graph_for_prompt
 from lightrag_client import LightRAGClient, LightRAGClientError
 from llm_writer import LLMWriterError, generate_text_with_ollama
 from pi_coding_agent_client import PiCodingAgentError, generate_text_with_pi_coding_agent
@@ -25,6 +27,8 @@ from patent_quality_tool import (
 )
 from similar_patent_analysis import generate_similar_patent_analysis
 from tool_registry import discover_bound_tools, register_tool
+from token_usage import TokenUsageTracker, markdown_report, record_generation_usage, set_current_token_tracker
+from runtime_paths import resource_root
 
 
 FINAL_DOCUMENT_STRUCTURE = [
@@ -91,6 +95,7 @@ class PatentCandidate:
 @dataclass
 class AgentState:
     documents: dict[str, Any] | None = None
+    knowledge_graph: dict[str, Any] | None = None
     material_text: str = ""
     initial_assessment: MaterialAssessment | None = None
     assessment: MaterialAssessment | None = None
@@ -121,14 +126,16 @@ class PatentWorkflowAgent:
         self.client = client
         self.output_dir = output_dir
         self.state = AgentState()
-        self.skills = load_agent_skills(Path.cwd())
+        self.skills = load_agent_skills(resource_root())
         self.skill_prompt = format_skills_for_prompt(self.skills)
+        self.token_usage = TokenUsageTracker("cli")
         self.tools = {
             name: AgentTool(name, spec.description, handler)
             for name, (spec, handler) in discover_bound_tools(self).items()
         }
 
     def run(self) -> Path:
+        set_current_token_tracker(self.token_usage)
         self._print_startup()
         max_steps = 20
         for step in range(1, max_steps + 1):
@@ -146,6 +153,10 @@ class PatentWorkflowAgent:
 
         if not self.state.output_path:
             raise RuntimeError("Agent 未能生成输出文件。")
+        (self.output_dir / "token_usage_report.md").write_text(
+            markdown_report(self.token_usage.to_dict()),
+            encoding="utf-8",
+        )
         return self.state.output_path
 
     def _print_startup(self) -> None:
@@ -210,7 +221,7 @@ Skills:
 建议工具：{recommended}
 """
         try:
-            choice = _generate_agent_text(self.config, prompt, timeout=60)
+            choice = _generate_agent_text(self.config, prompt, timeout=60, step_name="planner_choose_tool")
         except (LLMWriterError, CodexCLIError, PiCodingAgentError):
             return recommended
         return choice.strip().splitlines()[0].strip(" `。")
@@ -230,17 +241,18 @@ Skills:
             f"draft_ready={bool(self.state.final_markdown)}"
         )
 
-    @register_tool("read_knowledge_base", "读取 LightRAG 文档、处理状态和材料摘要。")
+    @register_tool("read_knowledge_base", "读取 LightRAG 当前知识图谱，并固定为后续写作的唯一知识库证据包。")
     def _tool_read_knowledge_base(self) -> str:
         self.state.documents = _load_documents(self.client)
-        self.state.material_text = _summarize_documents(self.state.documents)
-        return "[知识库] 已读取 LightRAG 文档和状态。"
+        self.state.knowledge_graph = build_knowledge_graph(self.client, self.state.documents)
+        self.state.material_text = format_knowledge_graph_for_prompt(self.state.knowledge_graph)
+        return "[知识库] 已读取并固定 LightRAG 知识图谱。后续写作仅使用图谱证据包。"
 
     @register_tool("assess_materials", "按多维度标准评估当前素材是否足以支撑专利写作。")
     def _tool_assess_materials(self) -> str:
         if self.state.documents is None:
             raise RuntimeError("需要先读取知识库。")
-        assessment = _assess_materials(self.state.documents, self.state.external)
+        assessment = _assess_materials(self.state.documents, self.state.external, knowledge_graph=self.state.knowledge_graph)
         if self.state.initial_assessment is None:
             self.state.initial_assessment = assessment
         self.state.assessment = assessment
@@ -359,7 +371,7 @@ def _load_documents(client: LightRAGClient) -> dict[str, Any]:
     return documents
 
 
-def _generate_agent_text(config: AppConfig, prompt: str, timeout: int = 180) -> str:
+def _generate_agent_text(config: AppConfig, prompt: str, timeout: int = 180, step_name: str = "agent_text_generation") -> str:
     """Generate text with the configured agent core."""
     if config.agent_core in {"pi", "pi_coding", "pi_coding_agent", "pi-coding-agent"}:
         pi_prompt = f"""你是 Pi coding agent 核。请优先利用项目内 skills 和当前项目上下文完成任务。
@@ -373,8 +385,10 @@ def _generate_agent_text(config: AppConfig, prompt: str, timeout: int = 180) -> 
 任务：
 {prompt}
 """
-        project_root = Path.cwd()
-        return generate_text_with_pi_coding_agent(
+        project_root = resource_root()
+        started_at = datetime_now()
+        start_time = time.perf_counter()
+        result = generate_text_with_pi_coding_agent(
             prompt=pi_prompt,
             project_root=project_root,
             pi_command=config.pi_command,
@@ -382,7 +396,20 @@ def _generate_agent_text(config: AppConfig, prompt: str, timeout: int = 180) -> 
             model=config.pi_model,
             skill_paths=[skill.path.parent for skill in load_agent_skills(project_root)],
             timeout=max(timeout, config.pi_timeout),
+            include_usage=True,
         )
+        response = result.text if hasattr(result, "text") else str(result)
+        record_generation_usage(
+            step_name=step_name,
+            provider=f"{config.agent_core}/{config.pi_provider}",
+            model=config.pi_model or "default",
+            prompt=pi_prompt,
+            response=response,
+            started_at=started_at,
+            start_time=start_time,
+            actual=result.usage if hasattr(result, "usage") else None,
+        )
+        return response
 
     if config.agent_core in {"codex", "codex_cli", "codex-cli"}:
         codex_prompt = f"""你是 Codex CLI agent 核。请优先利用本地 Codex skills、当前项目上下文和可用工具完成任务。
@@ -396,16 +423,46 @@ def _generate_agent_text(config: AppConfig, prompt: str, timeout: int = 180) -> 
 任务：
 {prompt}
 """
-        return generate_text_with_codex_cli(
+        started_at = datetime_now()
+        start_time = time.perf_counter()
+        response = generate_text_with_codex_cli(
             prompt=codex_prompt,
-            project_root=Path.cwd(),
+            project_root=resource_root(),
             codex_command=config.codex_command,
             model=config.codex_model,
             sandbox=config.codex_sandbox,
             enable_search=config.codex_enable_search,
             timeout=max(timeout, config.codex_timeout),
         )
-    return generate_text_with_ollama(config, prompt, timeout=timeout)
+        record_generation_usage(
+            step_name=step_name,
+            provider=config.agent_core,
+            model=config.codex_model or "default",
+            prompt=codex_prompt,
+            response=response,
+            started_at=started_at,
+            start_time=start_time,
+        )
+        return response
+    started_at = datetime_now()
+    start_time = time.perf_counter()
+    response = generate_text_with_ollama(config, prompt, timeout=timeout)
+    record_generation_usage(
+        step_name=step_name,
+        provider=config.llm_provider or "ollama",
+        model=config.llm_model or "default",
+        prompt=prompt,
+        response=response,
+        started_at=started_at,
+        start_time=start_time,
+    )
+    return response
+
+
+def datetime_now() -> str:
+    from datetime import datetime
+
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _flatten_documents(documents: dict[str, Any]) -> list[dict[str, Any]]:
@@ -442,16 +499,24 @@ def _summarize_documents(documents: dict[str, Any]) -> str:
 def _assess_materials(
     documents: dict[str, Any],
     external: ExternalSearchResult | None = None,
+    knowledge_graph: dict[str, Any] | None = None,
 ) -> MaterialAssessment:
     rows = _flatten_documents(documents)
     processed = [row for row in rows if str(row.get("status", "")).lower() == "processed"]
     total_chunks = sum(int(row.get("chunks_count") or 0) for row in processed)
-    summary_chars = sum(len(str(row.get("content_summary") or "")) for row in processed)
-    corpus = "\n".join(
-        f"{row.get('file_path', '')}\n{row.get('content_summary', '')}" for row in processed
-    )
+    graph_text = format_knowledge_graph_for_prompt(knowledge_graph) if knowledge_graph else ""
+    if knowledge_graph:
+        corpus = graph_text
+    else:
+        corpus = "\n".join(
+            f"{row.get('file_path', '')}\n{row.get('content_summary', '')}" for row in processed
+        )
     external_corpus = _format_search_results(external) if external else ""
     combined_corpus = "\n".join(part for part in (corpus, external_corpus) if part)
+    graph_nodes = knowledge_graph.get("nodes", []) if isinstance(knowledge_graph, dict) else []
+    graph_edges = knowledge_graph.get("edges", []) if isinstance(knowledge_graph, dict) else []
+    graph_document_nodes = [node for node in graph_nodes if isinstance(node, dict) and node.get("type") == "document"]
+    graph_entity_nodes = [node for node in graph_nodes if isinstance(node, dict) and node.get("type") != "document"]
 
     score = 0
     project_score = 0
@@ -500,6 +565,15 @@ def _assess_materials(
         add_dimension("检索颗粒度", 6, 10, False, "知识库 chunk 数量达到 5 个以上。", "知识库 chunk 数量少于 10，建议补充更完整资料。")
     else:
         add_dimension("检索颗粒度", 2, 10, False, "知识库 chunk 数量不足。", "知识库 chunk 数量少于 10，实施细节可能不足。")
+
+    if knowledge_graph:
+        covered_docs = len(graph_document_nodes)
+        if covered_docs >= max(1, min(len(processed), 3)) and len(graph_entity_nodes) >= 12 and len(graph_edges) >= 20:
+            add_dimension("知识图谱覆盖度", 15, 15, True, f"知识图谱覆盖 {covered_docs} 篇素材、{len(graph_entity_nodes)} 个实体、{len(graph_edges)} 条关系。", "知识图谱节点或关系不足，建议等待 LightRAG 图谱构建完成。")
+        elif covered_docs >= 1 and len(graph_entity_nodes) >= 6:
+            add_dimension("知识图谱覆盖度", 8, 15, False, f"知识图谱覆盖 {covered_docs} 篇素材、{len(graph_entity_nodes)} 个实体。", "知识图谱覆盖不足，可能无法独立支撑写作。")
+        else:
+            add_dimension("知识图谱覆盖度", 2, 15, False, "知识图谱覆盖不足。", "知识图谱尚未包含足够文档、实体和关系。")
 
     if _contains_any(combined_corpus, ["业务背景", "应用场景", "场景", "油藏", "井组", "铝电解", "电解槽", "工业"]):
         add_dimension("业务/应用背景", 12, 12, True, "知识库或外部补充材料包含业务背景或应用场景。", "材料中业务背景或应用场景不够明确。")
@@ -622,14 +696,14 @@ def _print_assessment(assessment: MaterialAssessment, documents: dict[str, Any])
 
 
 def _infer_search_topic(config: AppConfig, material_text: str) -> str:
-    prompt = f"""请根据以下知识库材料，提炼一个用于专利检索的中文检索主题。
+    prompt = f"""请根据以下已固定的知识图谱证据包，提炼一个用于专利检索的中文检索主题。
 要求：只输出一行，包含技术对象、核心方法、应用场景，不要解释。
 
-知识库材料：
+知识图谱证据包：
 {material_text[:5000]}
 """
     try:
-        topic = _generate_agent_text(config, prompt, timeout=120)
+        topic = _generate_agent_text(config, prompt, timeout=120, step_name="infer_search_topic")
     except (LLMWriterError, CodexCLIError, PiCodingAgentError):
         topic = "稠油 注采井 连通性 智能分析 专利 技术方案"
     return topic.splitlines()[0].strip(" -。") or "稠油 注采井 连通性 智能分析"
@@ -652,14 +726,19 @@ def _generate_candidates(
     assessment: MaterialAssessment,
     external: ExternalSearchResult,
     skill_instructions: str = "",
+    innovation_index: int = 50,
+    innovation_level: str = "medium",
+    graph_fusion: dict[str, Any] | None = None,
+    memory_context: str = "",
 ) -> list[PatentCandidate]:
     search_text = _format_search_results(external)
-    prompt = f"""你是专利选题顾问。请根据知识库材料和外部检索结果，提出 5 个可能的发明专利方向。
+    graph_fusion_text = _format_graph_fusion_for_prompt(graph_fusion)
+    prompt = f"""你是专利选题顾问。请根据已固定的知识图谱证据包和外部检索结果，提出 5 个可能的发明专利方向。
 
 外部检索结果使用边界：
 - AnySearch/外部检索结果不得直接作为新专利方案的核心创新来源。
 - 外部检索结果只能用于补充领域背景、识别已有技术、提取不可复用的技术特征组合、新颖性/创造性风险检查，以及指导技术避让。
-- 候选方案的核心创新必须优先来自知识库材料、项目场景、数据指标、实施流程或用户自有技术基础。
+- 候选方案的核心创新必须优先来自知识图谱证据包中已经出现的项目场景、数据指标、实施流程、实体关系或用户自有技术基础。
 
 你必须遵循以下 agent skills：
 {skill_instructions[:7000]}
@@ -678,8 +757,8 @@ def _generate_candidates(
 重合风险：...
 人工确认点：...
 素材充分性：...
-3. 不要直接写完整交底书。
-4. 优先选择与知识库材料高度相关、且能避开外部检索中相近专利的方向。
+3. 不要直接写完整交底书；不要使用 Markdown 粗体、表格或代码块包装字段名。
+4. 优先选择与知识图谱证据包高度相关、且能避开外部检索中相近专利的方向。
 5. 名称必须是短标题，直接写发明对象，不要写成长句；禁止使用“基于……的……”句式。
    错误示例：基于VMD频带能量特征与时序网络的铝电解槽阳极效应早期预警方法。
    正确示例：铝电解槽阳极效应早期预警方法。
@@ -688,24 +767,80 @@ def _generate_candidates(
    - 本方案相比已有专利的新技术特征是什么；
    - 技术效果是否由这些新技术特征带来；
    - 哪些部分仍存在重合风险，需要人工确认。
+7. 每个候选的核心方案必须说明如何从下方选定图谱节点和关系路径得到，不得绕开图谱节点凭空生成。
+8. 生成候选前必须参考“历史生成避重记忆”，避免与过去已经完成的专利标题、主题或 idea 重复。
+   - 不要生成与历史记录只有措辞差异、技术问题相同、核心路径相同或创新点相同的候选。
+   - 如果必须沿用相同领域，候选必须更换关键技术问题、图谱节点组合或技术效果来源。
+   - 历史生成避重记忆只用于避重，不得作为新的技术来源，也不要在候选或最终文档中直接暴露这段内部记忆。
 
 素材充分性评估：{assessment.score}/100，{assessment.level}
 
-知识库材料：
+候选生成可参考的图谱节点与关系路径：
+{graph_fusion_text}
+
+历史生成避重记忆：
+{memory_context or "暂无历史生成记忆。"}
+
+知识图谱证据包：
 {material_text[:6000]}
 
 外部检索结果：
 {search_text[:4000]}
 """
     try:
-        raw = _generate_agent_text(config, prompt, timeout=180)
+        raw = _generate_agent_text(config, prompt, timeout=180, step_name="generate_candidates")
     except (LLMWriterError, CodexCLIError, PiCodingAgentError) as exc:
-        raw = f"候选1\n名称：稠油注采井连通性智能评估方法及系统\n核心方案：基于注采生产数据、滞后响应和贡献度分析评估井组连通性。\n创新点：多指标融合、最佳滞后天数、单井贡献度拆分。\n避让现有技术：强调稠油注采井连通性场景和动态闭环评估。\n未复用已有技术特征：不复用外部检索中已有方案的完整模型结构、权利要求组合或控制闭环。\n新技术特征：将项目材料中的动态连通性指标、滞后响应和贡献度拆分组合为新的评估链路。\n技术效果来源：技术效果来自动态指标组合和贡献度拆分带来的识别精度与解释性改善。\n重合风险：外部检索不足时，模型结构和指标组合仍需人工核对是否已有相近权利要求。\n人工确认点：需核验正式专利库中的权利要求、实施例和同族专利。\n素材充分性：{assessment.level}\n\n生成失败提示：{exc}"
+        raise RuntimeError(f"候选 idea 生成失败：{exc}") from exc
 
     print("\n[候选专利方向]\n")
     print(raw)
     candidates = _parse_candidates(raw)
+    if len(candidates) < 5:
+        raise RuntimeError(
+            f"候选 idea 解析不足：期望 5 个，实际 {len(candidates)} 个。"
+            "请检查 Pi Agent 输出是否严格包含“候选1”到“候选5”和“名称：”字段。"
+        )
     return _ensure_candidate_count(candidates, material_text, external, assessment, raw, target=5)
+
+
+def _format_graph_fusion_for_prompt(graph_fusion: dict[str, Any] | None) -> str:
+    if not graph_fusion:
+        return "暂无预选图谱节点，请严格从知识图谱证据包中选择有关系支撑的节点。"
+    pairs = graph_fusion.get("node_pairs") or []
+    nodes = graph_fusion.get("selected_nodes") or []
+    path_nodes = graph_fusion.get("path_nodes") or nodes
+    edges = graph_fusion.get("path_edges") or graph_fusion.get("selected_edges") or []
+    lines = [
+        f"- 节点距离：{graph_fusion.get('distance', '未知')}",
+        f"- 中间节点数量：{graph_fusion.get('intermediate_node_count', 0)}",
+        f"- 选择理由：{graph_fusion.get('reason', '')}",
+    ]
+    for index, pair in enumerate(pairs, start=1):
+        left = pair.get("left", {})
+        right = pair.get("right", {})
+        lines.append(
+            f"- 节点组合{index}：{left.get('full_label') or left.get('label')} + {right.get('full_label') or right.get('label')}；距离 {pair.get('distance', '未知')}；中间节点 {pair.get('intermediate_node_count', 0)} 个；{pair.get('reason', '')}"
+        )
+    if nodes:
+        lines.append("- 本次生成必须优先使用的图谱节点：")
+        for node in nodes[:10]:
+            lines.append(
+                f"  - {node.get('full_label') or node.get('label')}（{node.get('type', 'entity')}，连接数 {node.get('degree', 0)}）：{node.get('summary', '')}"
+            )
+    if path_nodes and path_nodes != nodes:
+        lines.append("- 用于说明上述节点之间关联的图谱路径：")
+        for node in path_nodes[:12]:
+            marker = "引用节点" if any(node.get("id") == used.get("id") for used in nodes) else "中间节点"
+            lines.append(
+                f"  - [{marker}] {node.get('full_label') or node.get('label')}：{node.get('summary', '')}"
+            )
+    if edges:
+        lines.append("- 节点之间的图谱关系：")
+        for edge in edges[:10]:
+            lines.append(
+                f"  - {edge.get('source_label') or edge.get('source')} --{edge.get('label', '关联')}--> {edge.get('target_label') or edge.get('target')}"
+            )
+    return "\n".join(lines)
 
 
 def _parse_candidates(raw: str) -> list[PatentCandidate]:
@@ -714,10 +849,11 @@ def _parse_candidates(raw: str) -> list[PatentCandidate]:
     for chunk in chunks:
         if "名称" not in chunk:
             continue
-        match = re.search(r"名称[:：]\s*(.+)", chunk)
+        normalized = re.sub(r"\*\*([^*]+)\*\*", r"\1", chunk)
+        match = re.search(r"名称\s*[:：]\s*(.+)", normalized)
         title = _clean_candidate_title(match.group(1)) if match else ""
         if title:
-            candidates.append(PatentCandidate(title=title, summary=chunk[:500], raw=chunk.strip()))
+            candidates.append(PatentCandidate(title=title, summary=normalized[:500], raw=normalized.strip()))
     return candidates
 
 
@@ -765,7 +901,7 @@ def _fallback_candidates(
             "多源状态融合、趋势提前识别、阈值自适应。",
             "区别于单一监测或静态阈值方案，强调多指标联合预测。",
             "不复用外部已有专利中单一阈值报警、固定模型预测或完整数字孪生管控系统的技术特征组合。",
-            "将知识库材料中的多源状态指标、历史趋势和自适应阈值组织为面向目标对象的预测链路。",
+            "将知识图谱证据包中的多源状态指标、历史趋势和自适应阈值组织为面向目标对象的预测链路。",
             "技术效果来自多源状态融合和阈值自适应，而不是来自外部专利公开的通用监控结构。",
             "若外部专利已覆盖相同输入指标和同类预测闭环，仍存在重合风险。",
         ),
@@ -795,7 +931,7 @@ def _fallback_candidates(
             "数据映射、虚实同步、仿真评估闭环。",
             "区别于普通可视化系统，强调孪生模型与运行反馈的联动。",
             "不复用外部已有专利中完整数字孪生平台架构、三维可视化流程或管控系统权利要求组合。",
-            "将知识库材料中的对象建模、状态同步、仿真评估和反馈更新限定为特定监控链路。",
+            "将知识图谱证据包中的对象建模、状态同步、仿真评估和反馈更新限定为特定监控链路。",
             "技术效果来自虚实同步和反馈评估之间的闭环，而不是来自通用可视化展示。",
             "数字孪生方向已有公开较多，系统模块和同步流程需重点人工查重。",
         ),
@@ -987,7 +1123,7 @@ def _generate_section(
 
 素材充分性：{assessment.score}/100，{assessment.level}
 
-知识库材料：
+知识图谱证据包：
 {material_text[:6000]}
 
 外部检索结果：
@@ -1003,13 +1139,14 @@ def _generate_section(
 7. 背景技术只写本发明要解决的行业问题，避免泛泛行业综述；不要使用“技术空白一/二/三”“补足技术空白”等直白表述，也不要断言整个行业完全没有某项技术。
 8. “拟解决的技术问题”必须和背景技术中的问题一一对应：背景提出 a/b/c，发明内容就针对 a/b/c 解决。
 9. “关键创新点”放在发明内容开头，不要在后文单独再生成“区别于现有技术的关键创新点”章节。
-10. “有益效果”不得编造百分比、金额、精度提升等量化数据；只有知识库材料或外部检索中有明确依据时才可写量化结果，否则只写简洁定性效果。
+10. “有益效果”不得编造百分比、金额、精度提升等量化数据；只有知识图谱证据包或外部检索中有明确依据时才可写量化结果，否则只写简洁定性效果。
 11. 全文只保留一次文档类型表达，避免重复出现多个“技术交底书”标题。
 12. 所有公式必须使用标准 LaTeX：行内公式使用 $...$，独立公式使用单独的 $$...$$；不得使用代码围栏、Unicode 上下标、伪公式或 JSON 转义形式。公式后必须定义变量和单位。
 13. 最终文章只呈现专利主题内容，不得写入生成过程、质量审查、自查清单、修复说明、提示词、skill/tool、后端实现或“未使用某句式/使用某规则”等元信息。
+14. 不得引用或假设未出现在知识图谱证据包中的原始文章细节；如图谱证据不足，只能标注“待补充”。
 """
     try:
-        section = normalize_formula_markdown(_generate_agent_text(config, prompt, timeout=180))
+        section = normalize_formula_markdown(_generate_agent_text(config, prompt, timeout=180, step_name=f"generate_section:{section_name}"))
     except (LLMWriterError, CodexCLIError, PiCodingAgentError) as exc:
         return f"## {section_name}\n\n待补充。LLM 生成失败：{exc}"
     return _review_and_repair_section(
@@ -1054,7 +1191,7 @@ def _revise_section(
 当前章节原文：
 {current_section}
 
-可参考知识库材料：
+可参考知识图谱证据包：
 {material_text[:4000]}
 
 可参考外部检索结果：
@@ -1073,9 +1210,10 @@ def _revise_section(
 10. 避免重复出现多个“技术交底书”标题。
 11. 所有公式必须使用标准 LaTeX：行内公式使用 $...$，独立公式使用单独的 $$...$$；不得使用代码围栏或乱码符号。
 12. 最终文章只呈现专利主题内容，不得写入生成过程、质量审查、自查清单、修复说明、提示词、skill/tool、后端实现或“未使用某句式/使用某规则”等元信息。
+13. 不得引用或假设未出现在知识图谱证据包中的原始文章细节；如图谱证据不足，只能标注“待补充”。
 """
     try:
-        section = normalize_formula_markdown(_generate_agent_text(config, prompt, timeout=180))
+        section = normalize_formula_markdown(_generate_agent_text(config, prompt, timeout=180, step_name=f"revise_section:{section_name}"))
     except (LLMWriterError, CodexCLIError, PiCodingAgentError) as exc:
         return f"{current_section}\n\n> 修改失败：{exc}"
     return _review_and_repair_section(
@@ -1127,7 +1265,7 @@ def _review_and_repair_section(
 已确认前文：
 {chr(10).join(accepted_sections)[-4000:]}
 
-知识库证据：
+知识图谱证据包：
 {material_text[:5000]}
 
 外部检索上下文：
@@ -1138,12 +1276,12 @@ def _review_and_repair_section(
 
 要求：
 1. 只输出修复后的当前章节，不解释修复过程。
-2. 不得编造材料中没有的技术事实或量化效果。
+2. 不得编造知识图谱证据包中没有的技术事实或量化效果。
 3. 逐项解决质量检查问题，同时保留已经正确的内容。
 4. 最终文章只呈现专利主题内容，不得写入生成过程、质量审查、自查清单、修复说明、提示词、skill/tool、后端实现或“未使用某句式/使用某规则”等元信息。
 """
         try:
-            current = normalize_formula_markdown(_generate_agent_text(config, prompt, timeout=180))
+            current = normalize_formula_markdown(_generate_agent_text(config, prompt, timeout=180, step_name=f"repair_section:{section_name}"))
         except (LLMWriterError, CodexCLIError, PiCodingAgentError):
             break
         current = apply_deterministic_fixes(section_name, current)

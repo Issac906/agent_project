@@ -97,6 +97,26 @@ class LightRAGClient:
                 raise
             return self._request("POST", "/query/data", json={"query": question})
 
+    def popular_graph_labels(self, limit: int = 20) -> Any:
+        """Return popular knowledge graph labels from LightRAG's native graph API."""
+        return self._request("GET", "/graph/label/popular", params={"limit": limit})
+
+    def list_graph_labels(self) -> Any:
+        """Return all knowledge graph labels from LightRAG's native graph API."""
+        return self._request("GET", "/graph/label/list")
+
+    def get_graph(self, label: str, max_depth: int = 2, max_nodes: int = 60) -> Any:
+        """Return LightRAG's native knowledge graph around a label."""
+        return self._request(
+            "GET",
+            "/graphs",
+            params={
+                "label": label,
+                "max_depth": max_depth,
+                "max_nodes": max_nodes,
+            },
+        )
+
     def _build_query_payload(self, question: str) -> dict[str, Any]:
         """Build the request body for LightRAG query endpoints.
 

@@ -55,6 +55,7 @@
       let autoRunning = false;
       let pendingSectionTransition = null;
       let sectionBusyAction = null;
+      let latestHistoryRecord = null;
 
       if (window.mermaid) {
         mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "neutral" });
@@ -64,6 +65,19 @@
         return String(value || "").replace(/[&<>"']/g, (c) => ({
           "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
         }[c]));
+      }
+
+      function artifactLinks(artifacts) {
+        return Object.entries({
+          docx: "下载 Word 文档",
+          result: "下载最终 Markdown",
+          draft: "下载交互草稿 Markdown",
+          similarity_xlsx: "下载差异分析 Excel",
+          similarity_markdown: "下载差异分析 Markdown",
+          token_usage_report: "下载 Token 报告"
+        }).filter(([key]) => artifacts?.[key]).map(([key, label]) =>
+          `<a href="${artifacts[key]}" target="_blank">${label}</a>`
+        ).join("");
       }
 
       function assessmentBlock(title, item) {
@@ -287,15 +301,40 @@
         if (!strategy) return "";
         const layers = strategy.layers || [];
         const paths = strategy.candidate_paths || [];
+        const overview = strategy.fusion_overview || {};
+        const blueprint = strategy.fusion_blueprint || [];
         return `
           <section class="material-map">
             <div class="material-map-head">
               <div>
                 <h3>素材分层与组合依据</h3>
                 <p>${escapeHtml(strategy.summary || "系统已按材料用途完成分层。")}</p>
+                ${overview.summary ? `<p>${escapeHtml(overview.summary)}</p>` : ""}
                 ${strategy.external_usage_boundary ? `<p><strong>${escapeHtml(strategy.external_usage_boundary)}</strong></p>` : ""}
               </div>
             </div>
+            ${overview.anti_random_mix_rule ? `
+              <div class="fusion-overview">
+                <strong>防止乱融合规则</strong>
+                <p>${escapeHtml(overview.anti_random_mix_rule)}</p>
+                ${overview.graph_basis ? `<p>图谱依据：${escapeHtml(overview.graph_basis)}</p>` : ""}
+              </div>
+            ` : ""}
+            ${blueprint.length ? `
+              <div class="fusion-blueprint">
+                <h3>Agent 融合思路</h3>
+                <div class="fusion-step-grid">
+                  ${blueprint.map((step) => `
+                    <article class="fusion-step-card">
+                      <strong>${escapeHtml(step.stage)}</strong>
+                      <p>${escapeHtml(step.logic || "")}</p>
+                      <div class="path-tags">${(step.uses || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+                      <small>${escapeHtml(step.output || "")}</small>
+                    </article>
+                  `).join("")}
+                </div>
+              </div>
+            ` : ""}
             <div class="material-layer-grid">
               ${layers.map((layer) => `
                 <article class="material-layer-card">
@@ -326,11 +365,48 @@
                     <div class="path-tags">
                       ${(path.source_layers || []).map((layer) => `<span>${escapeHtml(layer.name)}</span>`).join("")}
                     </div>
+                    ${candidateFusionDetails(path)}
                   </article>
                 `).join("")}
               </div>
             ` : ""}
           </section>
+        `;
+      }
+
+      function candidateFusionDetails(path) {
+        const steps = path.fusion_steps || [];
+        const matrix = path.contribution_matrix || [];
+        const risks = path.risk_controls || [];
+        if (!steps.length && !matrix.length && !risks.length) return "";
+        return `
+          <details class="candidate-fusion-details">
+            <summary>展开融合证据链</summary>
+            ${steps.length ? `
+              <div class="fusion-detail-grid">
+                ${steps.map((step) => `
+                  <div class="fusion-detail-card">
+                    <strong>${escapeHtml(step.name)}</strong>
+                    <p>${escapeHtml(step.explanation || "")}</p>
+                    <div class="material-source-list">${(step.evidence || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>图谱综合证据</span>"}</div>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+            ${matrix.length ? `
+              <div class="fusion-matrix">
+                ${matrix.map((row) => `
+                  <div>
+                    <strong>${escapeHtml(row.layer)} · ${escapeHtml(row.role)}</strong>
+                    <p>${escapeHtml(row.meaning || "")}</p>
+                    <div class="material-source-list">${(row.sources || []).map((source) => `<span>${escapeHtml(source)}</span>`).join("")}</div>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+            ${path.non_reuse_boundary ? `<p class="fusion-boundary">不可复用边界：${escapeHtml(path.non_reuse_boundary)}</p>` : ""}
+            ${risks.length ? `<ul class="fusion-risk-list">${risks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+          </details>
         `;
       }
 
@@ -452,11 +528,24 @@
 
       function renderOverview() {
         const docs = state.knowledge?.documents || [];
+        const isFreshRun = state.phase === "created" && !(state.events || []).length && !busy;
+        const latestDownloads = latestHistoryRecord?.artifacts ? artifactLinks(latestHistoryRecord.artifacts) : "";
         return `
           <div class="section-head">
             <h2>当前状态</h2>
             <p>系统正在按知识库读取、素材评估、外部检索、候选生成、差异分析和分章节写作自动推进。需要你判断时会停下来。</p>
           </div>
+          ${isFreshRun ? `
+            <div class="download-panel">
+              <h3>当前流程尚未开始</h3>
+              <p>如果你想查看刚刚完成的结果，请进入历史记录。完整生成过程和文件下载都会保存在历史记录中。</p>
+              <div class="artifact-row">
+                <a href="/history" target="_blank">打开历史记录</a>
+                ${latestHistoryRecord?.detail_url ? `<a href="${latestHistoryRecord.detail_url}" target="_blank">查看最近一次完整过程</a>` : ""}
+                ${latestDownloads}
+              </div>
+            </div>
+          ` : ""}
           ${busy ? `<div class="running-card"><div class="spinner"></div><div><strong>正在执行下一步</strong><p>页面会自动切换到需要确认的节点。</p></div></div>` : ""}
           <div class="summary-grid small">
             <div class="metric"><span>Agent 核</span><strong>${escapeHtml(state.agent_core)}</strong></div>
@@ -473,17 +562,18 @@
       }
 
       function renderDone() {
+        const detailUrl = state.history_record?.detail_url || (state.history_record?.id ? `/history/${state.history_record.id}` : "");
         return `
           <div class="section-head">
             <h2>最终文档已生成</h2>
-            <p>结果已经保存到 outputs，可继续查看或返回首页重新生成。</p>
+            <p>最终 Markdown、Word 文档和完整生成过程已经保存，可直接下载或查看历史记录。</p>
           </div>
-          <div class="artifact-row">
-            ${state.artifacts.docx ? `<a href="${state.artifacts.docx}" target="_blank">下载 Word 文档</a>` : ""}
-            ${state.artifacts.draft ? `<a href="${state.artifacts.draft}" target="_blank">查看交互式草稿</a>` : ""}
-            ${state.artifacts.result ? `<a href="${state.artifacts.result}" target="_blank">查看 result.md</a>` : ""}
-            ${state.artifacts.similarity_markdown ? `<a href="${state.artifacts.similarity_markdown}" target="_blank">差异分析 Markdown</a>` : ""}
-            ${state.artifacts.similarity_xlsx ? `<a href="${state.artifacts.similarity_xlsx}" target="_blank">差异分析 Excel</a>` : ""}
+          <div class="download-panel">
+            <h3>最终文件下载</h3>
+            <div class="artifact-row">
+              ${artifactLinks(state.artifacts)}
+              ${detailUrl ? `<a href="${detailUrl}" target="_blank">查看完整生成过程</a>` : ""}
+            </div>
           </div>
           ${qualityBlock(state.final_quality, "最终文档质量检查")}
         `;
@@ -513,9 +603,57 @@
       }
 
       async function loadState() {
-        const res = await fetch(`/api/runs/${runId}`);
-        state = await res.json();
-        render();
+        try {
+          const res = await fetch(`/api/runs/${runId}`);
+          state = await readJson(res);
+          if (!latestHistoryRecord) {
+            await loadLatestHistoryRecord();
+          }
+          render();
+        } catch (error) {
+          await loadLatestHistoryRecord();
+          state = {
+            phase: "created",
+            waiting_for: null,
+            done: false,
+            events: [],
+            knowledge: { documents: [] },
+            external: { results: [] },
+            artifacts: {},
+            error: error.message || "运行状态读取失败。"
+          };
+          render();
+        }
+      }
+
+      async function readJson(response) {
+        let data = null;
+        try {
+          data = await response.json();
+        } catch (error) {
+          data = { error: await response.text().catch(() => "") };
+        }
+        if (!response.ok) {
+          throw new Error(data?.error || `请求失败：${response.status}`);
+        }
+        return data;
+      }
+
+      function keepStateError(error) {
+        state = {
+          ...(state || {}),
+          error: error.message || String(error || "请求失败")
+        };
+      }
+
+      async function loadLatestHistoryRecord() {
+        try {
+          const res = await fetch("/api/history");
+          const data = await res.json();
+          latestHistoryRecord = (data.records || [])[0] || null;
+        } catch (error) {
+          latestHistoryRecord = null;
+        }
       }
 
       async function advance() {
@@ -525,7 +663,9 @@
         render();
         try {
           const res = await fetch(`/api/runs/${runId}/advance`, { method: "POST" });
-          state = await res.json();
+          state = await readJson(res);
+        } catch (error) {
+          keepStateError(error);
         } finally {
           busy = false;
           render();
@@ -545,12 +685,18 @@
       async function selectCandidate() {
         const selected = document.querySelector('input[name="candidate"]:checked');
         const customTitle = document.getElementById("customTitle").value;
-        const res = await fetch(`/api/runs/${runId}/select`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ index: selected ? selected.value : null, custom_title: customTitle })
-        });
-        state = await res.json();
+        try {
+          const res = await fetch(`/api/runs/${runId}/select`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ index: selected ? selected.value : null, custom_title: customTitle })
+          });
+          state = await readJson(res);
+        } catch (error) {
+          keepStateError(error);
+          render();
+          return;
+        }
         render();
         runUntilHumanInput();
       }
@@ -567,18 +713,22 @@
           };
         }
         render();
+        let succeeded = false;
         try {
           const res = await fetch(`/api/runs/${runId}/section`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action, instruction, content })
           });
-          state = await res.json();
+          state = await readJson(res);
+          succeeded = true;
+        } catch (error) {
+          keepStateError(error);
         } finally {
           sectionBusyAction = null;
           render();
         }
-        if (!["rewrite", "revise"].includes(action)) {
+        if (succeeded && !["rewrite", "revise"].includes(action)) {
           runUntilHumanInput();
         }
       }

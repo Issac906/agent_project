@@ -36,6 +36,30 @@
         </div>
       </section>
 
+      <section class="panel compact-panel">
+        <div class="panel-head">
+          <div>
+            <h2>生成偏好</h2>
+            <p>选择图谱节点探索范围。低档只看邻近区域，中档看较大范围，高档允许全图组合。</p>
+          </div>
+          <span class="status-pill" id="innovationValue">中</span>
+        </div>
+        <div class="segmented-control" id="innovationLevelControl">
+          <label>
+            <input type="radio" name="innovationLevel" value="low">
+            <span>低</span>
+          </label>
+          <label>
+            <input type="radio" name="innovationLevel" value="medium" checked>
+            <span>中</span>
+          </label>
+          <label>
+            <input type="radio" name="innovationLevel" value="high">
+            <span>高</span>
+          </label>
+        </div>
+      </section>
+
       <section class="panel">
         <div class="panel-head">
           <div>
@@ -58,6 +82,8 @@
           </div>
         </div>
         <div id="toolMessage" class="tool-message hidden"></div>
+        <div id="knowledgeBases" class="knowledge-bases"></div>
+        <div id="knowledgeGraph" class="knowledge-graph"></div>
         <div id="documents" class="doc-list"></div>
       </section>
     </main>
@@ -69,7 +95,16 @@
       const allCount = document.getElementById("allCount");
       const failedCount = document.getElementById("failedCount");
       const toolMessage = document.getElementById("toolMessage");
+      const knowledgeGraphEl = document.getElementById("knowledgeGraph");
+      const knowledgeBasesEl = document.getElementById("knowledgeBases");
       const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
+      const innovationValue = document.getElementById("innovationValue");
+      const graphMemory = {
+        positions: new Map(),
+        nodeIds: new Set(),
+      };
+      let selectedKnowledgeBaseId = "all";
+      let knowledgeScopeOptions = [];
 
       function showMessage(text, type = "info") {
         toolMessage.className = `tool-message ${type}`;
@@ -86,6 +121,11 @@
         return text.length > max ? `${text.slice(0, max)}...` : text;
       }
 
+      function shortText(value, limit) {
+        const text = String(value || "未命名");
+        return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+      }
+
       async function loadKnowledge() {
         loadState.textContent = "读取中";
         documentsEl.innerHTML = '<div class="empty">正在读取知识库...</div>';
@@ -97,6 +137,7 @@
           allCount.textContent = counts.all ?? "-";
           failedCount.textContent = counts.failed ?? "-";
           loadState.textContent = "已连接";
+          renderKnowledgeBases(data.knowledge_bases || [], data.graph, data.documents || []);
           if (!data.documents.length) {
             documentsEl.innerHTML = '<div class="empty">暂无可用文档</div>';
             return;
@@ -125,6 +166,8 @@
         } catch (err) {
           loadState.textContent = "读取失败";
           documentsEl.innerHTML = `<div class="empty danger">${err}</div>`;
+          knowledgeBasesEl.innerHTML = "";
+          knowledgeGraphEl.innerHTML = `<div class="empty danger">知识图谱读取失败：${escapeHtml(err)}</div>`;
         }
       }
 
@@ -142,6 +185,448 @@
         return String(value || "").replace(/[&<>"']/g, (c) => ({
           "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
         }[c]));
+      }
+
+      function renderKnowledgeGraph(graph) {
+        if (graph?.layout === "native-network" || graph?.source === "lightrag_native_graph") {
+          renderNativeKnowledgeGraph(graph);
+          return;
+        }
+
+        const rawNodes = graph?.nodes || [];
+        const rawEdges = graph?.edges || [];
+        if (!rawNodes.length) {
+          knowledgeGraphEl.innerHTML = '<div class="empty">暂无知识图谱</div>';
+          return;
+        }
+
+        const root = rawNodes.find((node) => node.type === "root") || rawNodes[0];
+        const docs = rawNodes.filter((node) => node.type === "document").slice(0, 8);
+        const concepts = rawNodes.filter((node) => node.type !== "root" && node.type !== "document").slice(0, 8);
+        const visibleNodes = [root, ...docs, ...concepts];
+        const nodeById = new Map(rawNodes.map((node) => [node.id, node]));
+        const width = 1120;
+        const rowGap = 82;
+        const laneCount = Math.max(docs.length, concepts.length, 4);
+        const height = Math.max(450, 150 + laneCount * rowGap);
+        const centerY = height / 2;
+        const positions = new Map();
+        positions.set(root.id, { x: 560, y: centerY, w: 142, h: 62 });
+
+        const conceptSources = new Map();
+        rawEdges.forEach((edge) => {
+          const sourceNode = nodeById.get(edge.source);
+          const targetNode = nodeById.get(edge.target);
+          if (!sourceNode || !targetNode) return;
+          const conceptId = targetNode.type === "document" ? edge.source : edge.target;
+          const docNode = sourceNode.type === "document" ? sourceNode : targetNode.type === "document" ? targetNode : null;
+          const conceptNode = nodeById.get(conceptId);
+          if (!docNode || !conceptNode || conceptNode.type === "document" || conceptNode.type === "root") return;
+          const list = conceptSources.get(conceptId) || [];
+          list.push(`${docNode.label || docNode.id}：${edge.label || "关联"}`);
+          conceptSources.set(conceptId, Array.from(new Set(list)).slice(0, 4));
+        });
+
+        function stack(nodes, x, boxWidth, gap = rowGap) {
+          const total = (nodes.length - 1) * gap;
+          const startY = centerY - total / 2;
+          nodes.forEach((node, index) => {
+            positions.set(node.id, { x, y: startY + index * gap, w: boxWidth, h: 52 });
+          });
+        }
+        stack(docs, 210, 255);
+        stack(concepts, 910, 230);
+
+        const displayEdges = [
+          ...docs.map((doc) => ({ source: doc.id, target: root.id, label: "汇入", source_label: doc.label, target_label: root.label })),
+          ...concepts.map((concept) => ({ source: root.id, target: concept.id, label: "提炼", source_label: root.label, target_label: concept.label })),
+        ];
+
+        function edgePath(edge, index, side) {
+          const source = positions.get(edge.source);
+          const target = positions.get(edge.target);
+          if (!source || !target) return "";
+          const sourceRight = source.x < target.x;
+          const x1 = source.x + (sourceRight ? source.w / 2 : -source.w / 2);
+          const y1 = source.y;
+          const x2 = target.x + (sourceRight ? -target.w / 2 : target.w / 2);
+          const y2 = target.y;
+          const laneOffset = ((index % 3) - 1) * 12;
+          const c1 = x1 + (x2 - x1) * 0.46 + laneOffset;
+          const c2 = x1 + (x2 - x1) * 0.54 + laneOffset;
+          return `
+            <path class="kg-edge-path ${side}" d="M ${x1} ${y1} C ${c1} ${y1}, ${c2} ${y2}, ${x2} ${y2}">
+              <title>${escapeHtml(edge.source_label || edge.source)} ${escapeHtml(edge.label || "关联")} ${escapeHtml(edge.target_label || edge.target)}</title>
+            </path>
+          `;
+        }
+
+        const leftEdges = displayEdges.filter((edge) => edge.target === root.id).map((edge, index) => edgePath(edge, index, "left")).join("");
+        const rightEdges = displayEdges.filter((edge) => edge.source === root.id).map((edge, index) => edgePath(edge, index, "right")).join("");
+
+        function textLines(label, maxChars, maxLines = 2) {
+          const value = String(label || "未命名");
+          const lines = [];
+          for (let index = 0; index < value.length && lines.length < maxLines; index += maxChars) {
+            lines.push(value.slice(index, index + maxChars));
+          }
+          if (value.length > maxChars * maxLines && lines.length) {
+            lines[lines.length - 1] = `${lines[lines.length - 1].slice(0, Math.max(1, maxChars - 1))}…`;
+          }
+          return lines;
+        }
+
+        function nodeSvg(node) {
+          const point = positions.get(node.id);
+          if (!point) return "";
+          const maxChars = node.type === "document" ? 13 : node.type === "root" ? 8 : 9;
+          const lines = textLines(node.label || node.id, maxChars, 2);
+          const yStart = lines.length === 1 ? 5 : -5;
+          const sources = conceptSources.get(node.id) || [];
+          const sourceText = sources.length ? `
+来源关联：
+${sources.join("\n")}` : "";
+          return `
+            <g class="kg-node ${escapeHtml(node.type || "concept")}" transform="translate(${point.x}, ${point.y})">
+              <rect x="${-point.w / 2}" y="${-point.h / 2}" width="${point.w}" height="${point.h}" rx="10"></rect>
+              <title>${escapeHtml(node.label || node.id)}
+${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
+              ${lines.map((line, index) => `<text text-anchor="middle" y="${yStart + index * 15}">${escapeHtml(line)}</text>`).join("")}
+            </g>
+          `;
+        }
+
+        knowledgeGraphEl.innerHTML = `
+          <div class="kg-head">
+            <div>
+              <h3>知识图谱</h3>
+              <p>${escapeHtml(graph.summary || "已基于当前知识库生成素材关系图。")}</p>
+            </div>
+            <span>${escapeHtml(graph.layout || graph.source || "graph")}</span>
+          </div>
+          <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="当前知识库知识图谱">
+            <defs>
+              <marker id="kgArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+                <path d="M 0 0 L 8 4 L 0 8 z"></path>
+              </marker>
+            </defs>
+            <text class="kg-column-title" x="210" y="36" text-anchor="middle">素材文档</text>
+            <text class="kg-column-title" x="560" y="36" text-anchor="middle">知识库主题</text>
+            <text class="kg-column-title" x="910" y="36" text-anchor="middle">核心概念</text>
+            <text class="kg-column-note" x="910" y="58" text-anchor="middle">悬停节点查看来源文档</text>
+            ${leftEdges}
+            ${rightEdges}
+            ${visibleNodes.map(nodeSvg).join("")}
+          </svg>
+          ${(graph.notes || []).length ? `<div class="kg-notes">${graph.notes.map((note) => `<span>${escapeHtml(note)}</span>`).join("")}</div>` : ""}
+        `;
+      }
+
+      function renderKnowledgeBases(groups, fullGraph, documents) {
+        knowledgeScopeOptions = [
+          {
+            id: "all",
+            name: "总知识库",
+            description: "使用当前 LightRAG 知识库的完整图谱，和之前一样覆盖全部素材。",
+            document_count: documents.length,
+            node_count: (fullGraph?.nodes || []).length,
+            edge_count: (fullGraph?.edges || []).length,
+            documents,
+            graph: fullGraph,
+          },
+          ...groups,
+        ];
+        if (!knowledgeScopeOptions.some((item) => item.id === selectedKnowledgeBaseId)) {
+          selectedKnowledgeBaseId = "all";
+        }
+        const selected = knowledgeScopeOptions.find((item) => item.id === selectedKnowledgeBaseId) || knowledgeScopeOptions[0];
+        if (!knowledgeScopeOptions.length) {
+          knowledgeBasesEl.innerHTML = '<div class="empty">暂无可选知识图谱。</div>';
+          knowledgeGraphEl.innerHTML = '<div class="empty">暂无知识图谱</div>';
+          return;
+        }
+        knowledgeBasesEl.innerHTML = `
+          <div class="kb-group-head">
+            <div>
+              <h3>本次生成使用图谱</h3>
+              <p>请选择一个图谱作为本次专利生成的唯一知识库证据源。</p>
+            </div>
+            <span>${knowledgeScopeOptions.length} 个可选图谱</span>
+          </div>
+          <div class="kb-group-grid">
+            ${knowledgeScopeOptions.map((group) => `
+              <label class="kb-card kb-choice ${group.id === selectedKnowledgeBaseId ? "selected" : ""}">
+                <input type="radio" name="knowledgeBaseId" value="${escapeHtml(group.id)}" ${group.id === selectedKnowledgeBaseId ? "checked" : ""}>
+                <div class="registry-head">
+                  <strong>${escapeHtml(group.name || "未命名知识库")}</strong>
+                  <span>${group.document_count || 0} 文档</span>
+                </div>
+                <p>${escapeHtml(group.description || "")}</p>
+                <div class="kb-stats">
+                  <span>${group.node_count || 0} 节点</span>
+                  <span>${group.edge_count || 0} 关系</span>
+                </div>
+                <div class="material-source-list">
+                  ${(group.documents || []).slice(0, 4).map((doc) => `<span>${escapeHtml(doc.file_path || "未知文档")}</span>`).join("")}
+                </div>
+                ${knowledgeBaseMiniGraph(group.graph)}
+              </label>
+            `).join("")}
+          </div>
+        `;
+        knowledgeBasesEl.querySelectorAll('input[name="knowledgeBaseId"]').forEach((input) => {
+          input.addEventListener("change", () => selectKnowledgeScope(input.value));
+        });
+        renderKnowledgeGraph(selected?.graph || fullGraph);
+      }
+
+      function selectKnowledgeScope(id) {
+        selectedKnowledgeBaseId = id || "all";
+        knowledgeBasesEl.querySelectorAll(".kb-choice").forEach((card) => {
+          const input = card.querySelector('input[name="knowledgeBaseId"]');
+          card.classList.toggle("selected", input?.value === selectedKnowledgeBaseId);
+        });
+        const selected = knowledgeScopeOptions.find((item) => item.id === selectedKnowledgeBaseId) || knowledgeScopeOptions[0];
+        graphMemory.positions = new Map();
+        graphMemory.nodeIds = new Set();
+        renderKnowledgeGraph(selected?.graph);
+      }
+
+      function knowledgeBaseMiniGraph(graph) {
+        const nodes = (graph?.nodes || []).filter((node) => node && node.id).slice(0, 18);
+        const nodeIds = new Set(nodes.map((node) => node.id));
+        const edges = (graph?.edges || [])
+          .filter((edge) => edge && nodeIds.has(edge.source) && nodeIds.has(edge.target))
+          .slice(0, 24);
+        if (!nodes.length) return '<div class="kb-mini-graph empty">暂无子图谱</div>';
+        const width = 420;
+        const height = 210;
+        const center = { x: width / 2, y: height / 2 };
+        const positioned = nodes.map((node, index) => {
+          const angle = (index * 2.399963229728653) % (Math.PI * 2);
+          const ring = 44 + (index % 4) * 22;
+          return {
+            ...node,
+            x: center.x + Math.cos(angle) * ring,
+            y: center.y + Math.sin(angle) * ring * 0.62,
+            r: Math.max(5, Math.min(18, 6 + Number(node.degree || 0) * 1.8)),
+          };
+        });
+        const byId = new Map(positioned.map((node) => [node.id, node]));
+        return `
+          <svg class="kb-mini-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="分类知识库子图谱">
+            ${edges.map((edge) => {
+              const a = byId.get(edge.source);
+              const b = byId.get(edge.target);
+              if (!a || !b) return "";
+              return `<line class="kg-network-edge" x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"><title>${escapeHtml(edge.label || "关联")}</title></line>`;
+            }).join("")}
+            ${positioned.map((node) => `
+              <g class="kg-network-node ${escapeHtml(node.type || "concept")}" transform="translate(${node.x.toFixed(1)}, ${node.y.toFixed(1)})">
+                <circle r="${node.r.toFixed(1)}"></circle>
+                <title>${escapeHtml(node.full_label || node.label || node.id)}\n${escapeHtml(node.summary || "")}</title>
+                ${node.degree >= 3 ? `<text x="${node.r + 5}" y="4">${escapeHtml(shortText(node.full_label || node.label || node.id, 16))}</text>` : ""}
+              </g>
+            `).join("")}
+          </svg>
+        `;
+      }
+
+      function renderNativeKnowledgeGraph(graph) {
+        const rawNodes = (graph?.nodes || []).filter((node) => node && node.id);
+        const rawEdges = (graph?.edges || []).filter((edge) => edge && edge.source && edge.target);
+        if (!rawNodes.length) {
+          knowledgeGraphEl.innerHTML = '<div class="empty">暂无知识图谱</div>';
+          return;
+        }
+        const currentNodeIds = new Set(rawNodes.map((node) => node.id));
+        const hasPreviousGraph = graphMemory.nodeIds.size > 0;
+        const addedCount = hasPreviousGraph
+          ? rawNodes.filter((node) => !graphMemory.nodeIds.has(node.id)).length
+          : 0;
+        const removedCount = hasPreviousGraph
+          ? Array.from(graphMemory.nodeIds).filter((id) => !currentNodeIds.has(id)).length
+          : 0;
+
+        const width = 1120;
+        const height = 620;
+        const center = { x: width / 2, y: height / 2 };
+        const nodes = rawNodes.map((node, index) => ({
+          ...node,
+          index,
+          degree: Number(node.degree || 0),
+          radius: Math.max(5, Math.min(34, 7 + Number(node.degree || 0) * 2.2 + (node.is_focus ? 12 : 0))),
+          delta: hasPreviousGraph && !graphMemory.nodeIds.has(node.id) ? "added" : "",
+        }));
+        const nodeById = new Map(nodes.map((node) => [node.id, node]));
+        const edges = rawEdges
+          .map((edge) => ({ ...edge, sourceNode: nodeById.get(edge.source), targetNode: nodeById.get(edge.target) }))
+          .filter((edge) => edge.sourceNode && edge.targetNode);
+
+        nodes.forEach((node, index) => {
+          const previousPoint = graphMemory.positions.get(node.id);
+          if (previousPoint) {
+            node.x = previousPoint.x;
+            node.y = previousPoint.y;
+            return;
+          }
+          if (node.is_focus) {
+            node.x = center.x;
+            node.y = center.y;
+            return;
+          }
+          const angle = (index * 2.399963229728653) % (Math.PI * 2);
+          const ring = 120 + (index % 5) * 42 + Math.min(80, node.degree * 8);
+          node.x = center.x + Math.cos(angle) * ring;
+          node.y = center.y + Math.sin(angle) * ring * 0.68;
+        });
+
+        for (let step = 0; step < 180; step += 1) {
+          nodes.forEach((node) => { node.vx = (node.vx || 0) * 0.82; node.vy = (node.vy || 0) * 0.82; });
+          for (let i = 0; i < nodes.length; i += 1) {
+            for (let j = i + 1; j < nodes.length; j += 1) {
+              const a = nodes[i];
+              const b = nodes[j];
+              const dx = a.x - b.x || 0.01;
+              const dy = a.y - b.y || 0.01;
+              const dist2 = Math.max(80, dx * dx + dy * dy);
+              const force = 950 / dist2;
+              const fx = dx * force;
+              const fy = dy * force;
+              if (!a.is_focus) { a.vx += fx; a.vy += fy; }
+              if (!b.is_focus) { b.vx -= fx; b.vy -= fy; }
+            }
+          }
+          edges.forEach((edge) => {
+            const a = edge.sourceNode;
+            const b = edge.targetNode;
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            const target = 105 + Math.min(45, (a.radius + b.radius) * 1.4);
+            const force = (dist - target) * 0.012;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+            if (!a.is_focus) { a.vx += fx; a.vy += fy; }
+            if (!b.is_focus) { b.vx -= fx; b.vy -= fy; }
+          });
+          nodes.forEach((node) => {
+            if (node.is_focus) return;
+            node.vx += (center.x - node.x) * 0.002;
+            node.vy += (center.y - node.y) * 0.002;
+            node.x = Math.max(42, Math.min(width - 42, node.x + node.vx));
+            node.y = Math.max(52, Math.min(height - 42, node.y + node.vy));
+          });
+        }
+
+        function nodeClass(node) {
+          if (node.is_focus || node.type === "root") return "focus";
+          return String(node.type || "concept").replace(/[^a-z0-9_-]/gi, "");
+        }
+
+        function edgePath(edge, index) {
+          const a = edge.sourceNode;
+          const b = edge.targetNode;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
+          const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+          const bend = ((index % 5) - 2) * 9;
+          const cx = mx - (dy / len) * bend;
+          const cy = my + (dx / len) * bend;
+          return `
+            <path class="kg-network-edge" d="M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}">
+              <title>${escapeHtml(edge.source_label || edge.source)} ${escapeHtml(edge.label || "关联")} ${escapeHtml(edge.target_label || edge.target)}</title>
+            </path>
+          `;
+        }
+
+        function nodeSvg(node) {
+          const showLabel = node.is_focus || node.degree >= 3 || node.radius >= 15;
+          const title = [
+            node.full_label || node.label || node.id,
+            node.native_type ? `类型：${node.native_type}` : "",
+            node.file_path ? `来源：${node.file_path}` : "",
+            node.summary || "",
+          ].filter(Boolean).join("\n");
+          return `
+            <g class="kg-network-node ${escapeHtml(nodeClass(node))} ${node.delta}" data-node-id="${escapeHtml(node.id)}" transform="translate(${node.x.toFixed(1)}, ${node.y.toFixed(1)})" tabindex="0" role="button">
+              <circle r="${node.radius.toFixed(1)}"></circle>
+              <title>${escapeHtml(title)}</title>
+              ${showLabel ? `<text x="${node.radius + 7}" y="4">${escapeHtml(shortText(node.full_label || node.label || node.id, node.is_focus ? 28 : 22))}</text>` : ""}
+            </g>
+          `;
+        }
+
+        knowledgeGraphEl.innerHTML = `
+          <div class="kg-head">
+            <div>
+              <h3>知识图谱</h3>
+              <p>${escapeHtml(graph.summary || "已基于当前知识库生成素材关系图。")}</p>
+            </div>
+            <span>LightRAG Graph</span>
+          </div>
+          <svg class="kg-network" viewBox="0 0 ${width} ${height}" role="img" aria-label="LightRAG 原生知识图谱网络">
+            ${edges.map(edgePath).join("")}
+            ${nodes.map(nodeSvg).join("")}
+          </svg>
+          <div class="kg-legend">
+            <span><i class="focus"></i>中心实体</span>
+            <span><i class="concept"></i>概念</span>
+            <span><i class="method"></i>方法/系统</span>
+            <span><i class="metric"></i>指标</span>
+            <span><i class="scenario"></i>场景</span>
+            ${hasPreviousGraph ? `<span class="kg-diff">本次变化：新增 ${addedCount}，减少 ${removedCount}</span>` : ""}
+          </div>
+          <div id="kgNodeDetail" class="kg-node-detail hidden"></div>
+          ${(graph.notes || []).length ? `<div class="kg-notes">${graph.notes.map((note) => `<span>${escapeHtml(note)}</span>`).join("")}</div>` : ""}
+        `;
+
+        const nextPositions = new Map();
+        nodes.forEach((node) => nextPositions.set(node.id, { x: node.x, y: node.y }));
+        graphMemory.positions = nextPositions;
+        graphMemory.nodeIds = currentNodeIds;
+
+        const detailEl = document.getElementById("kgNodeDetail");
+        function openNodeDetail(node) {
+          const relatedEdges = edges.filter((edge) => edge.source === node.id || edge.target === node.id).slice(0, 8);
+          detailEl.className = "kg-node-detail";
+          detailEl.innerHTML = `
+            <div class="kg-detail-head">
+              <div>
+                <span>${escapeHtml(node.native_type || node.type || "entity")}</span>
+                <h4>${escapeHtml(node.full_label || node.label || node.id)}</h4>
+              </div>
+              <button class="button ghost" type="button" id="kgDetailClose">关闭</button>
+            </div>
+            <p>${escapeHtml(node.summary || "LightRAG 暂未返回该节点的详细描述。")}</p>
+            ${node.file_path ? `<div class="kg-detail-meta"><strong>来源文档</strong><span>${escapeHtml(node.file_path)}</span></div>` : ""}
+            ${node.source_id ? `<div class="kg-detail-meta"><strong>来源片段</strong><span>${escapeHtml(node.source_id)}</span></div>` : ""}
+            ${relatedEdges.length ? `
+              <div class="kg-detail-relations">
+                <strong>相关关系</strong>
+                ${relatedEdges.map((edge) => `
+                  <span>${escapeHtml(edge.source_label || edge.source)} ${escapeHtml(edge.label || "关联")} ${escapeHtml(edge.target_label || edge.target)}</span>
+                `).join("")}
+              </div>
+            ` : ""}
+          `;
+          document.getElementById("kgDetailClose").addEventListener("click", () => {
+            detailEl.className = "kg-node-detail hidden";
+          });
+        }
+        knowledgeGraphEl.querySelectorAll(".kg-network-node").forEach((element) => {
+          const node = nodeById.get(element.dataset.nodeId);
+          if (!node) return;
+          element.addEventListener("click", () => openNodeDetail(node));
+          element.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openNodeDetail(node);
+            }
+          });
+        });
       }
 
       async function uploadMaterial(event) {
@@ -224,7 +709,14 @@
         btn.disabled = true;
         btn.textContent = "启动中";
         try {
-          const res = await fetch("/api/runs", { method: "POST" });
+          const res = await fetch("/api/runs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              innovation_level: document.querySelector('input[name="innovationLevel"]:checked')?.value || "medium",
+              knowledge_base_id: selectedKnowledgeBaseId || "all"
+            })
+          });
           const data = await res.json();
           window.location.href = data.url;
         } finally {
@@ -238,6 +730,12 @@
       document.getElementById("clearBtn").addEventListener("click", clearKnowledge);
       document.getElementById("refreshBtn").addEventListener("click", loadKnowledge);
       document.getElementById("startBtn").addEventListener("click", startRun);
+      document.querySelectorAll('input[name="innovationLevel"]').forEach((input) => {
+        input.addEventListener("change", () => {
+          const label = { low: "低", medium: "中", high: "高" }[input.value] || "中";
+          innovationValue.textContent = label;
+        });
+      });
       loadKnowledge();
     </script>
   </body>

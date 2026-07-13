@@ -15,6 +15,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 from agent_skill_loader import format_skills_for_prompt, load_agent_skills
 from config import AppConfig, load_config
@@ -23,7 +24,15 @@ from docx_exporter import export_markdown_to_docx
 from external_search import ExternalSearchResult, search_external_materials
 from formula_utils import normalize_formula_markdown
 from lightrag_client import LightRAGClient, LightRAGClientError
-from material_strategy import build_material_strategy
+from knowledge_graph import build_knowledge_graph, format_knowledge_graph_for_prompt
+from knowledge_base_groups import build_virtual_knowledge_bases
+from material_strategy import build_material_strategy, innovation_index_for_level, innovation_level_label, normalize_innovation_level
+from patent_memory import (
+    append_patent_memory,
+    format_patent_memory_for_prompt,
+    load_patent_memory,
+    summarize_candidate_for_memory,
+)
 from patent_discovery_agent import (
     WRITING_STEPS,
     MaterialAssessment,
@@ -38,21 +47,27 @@ from patent_discovery_agent import (
     _load_documents,
     _clean_candidate_title,
     _revise_section,
-    _summarize_documents,
 )
 from patent_quality_tool import review_document, review_section
 from similar_patent_analysis import generate_similar_patent_analysis
+from token_usage import TokenUsageTracker, markdown_report, set_current_token_tracker
 from tool_registry import register_tool, registered_tools
+from runtime_paths import data_path, resource_path, resource_root
+from user_config import save_user_config, user_config_view
 
 
-OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR = data_path("outputs")
 HISTORY_DIR = OUTPUT_DIR / "history"
 HISTORY_INDEX = HISTORY_DIR / "index.json"
 MAX_HISTORY_ITEMS = 10
 MATERIAL_READY_SCORE = 80
 
 load_dotenv()
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    template_folder=str(resource_path("templates")),
+    static_folder=str(resource_path("static")),
+)
 RUNS: dict[str, "WebPatentRun"] = {}
 RUNS_LOCK = Lock()
 
@@ -67,6 +82,26 @@ def handle_lightrag_error(exc: LightRAGClientError) -> Any:
     return jsonify({"error": str(exc)}), 502
 
 
+@app.errorhandler(Exception)
+def handle_unexpected_error(exc: Exception) -> Any:
+    if isinstance(exc, HTTPException):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": exc.description}), exc.code or 500
+        return exc
+    if request.path.startswith("/api/"):
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+    raise exc
+
+
+@app.after_request
+def disable_dynamic_cache(response: Any) -> Any:
+    if request.path.startswith(("/api/", "/run/", "/history", "/settings", "/outputs/")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 def make_client(config: AppConfig) -> LightRAGClient:
     return LightRAGClient(
         base_url=config.lightrag_base_url,
@@ -77,14 +112,23 @@ def make_client(config: AppConfig) -> LightRAGClient:
 
 
 class WebPatentRun:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        innovation_level: str = "medium",
+        knowledge_base_id: str = "all",
+    ) -> None:
         self.id = uuid4().hex[:12]
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self.config = config
+        self.innovation_level = normalize_innovation_level(innovation_level)
+        self.innovation_index = innovation_index_for_level(self.innovation_level)
+        self.knowledge_base_id = str(knowledge_base_id or "all")
         self.client = make_client(config)
         self.output_dir = OUTPUT_DIR
-        self.skills = load_agent_skills(Path.cwd())
+        self.skills = load_agent_skills(resource_root())
         self.skill_prompt = format_skills_for_prompt(self.skills)
+        self.token_usage = TokenUsageTracker(self.id)
 
         self.phase = "created"
         self.waiting_for: str | None = None
@@ -93,6 +137,11 @@ class WebPatentRun:
         self.interactions: list[dict[str, Any]] = []
 
         self.documents: dict[str, Any] | None = None
+        self.active_documents: dict[str, Any] | None = None
+        self.full_knowledge_graph: dict[str, Any] | None = None
+        self.knowledge_graph: dict[str, Any] | None = None
+        self.knowledge_bases: list[dict[str, Any]] = []
+        self.selected_knowledge_base: dict[str, Any] | None = None
         self.material_text = ""
         self.initial_assessment: MaterialAssessment | None = None
         self.assessment: MaterialAssessment | None = None
@@ -101,6 +150,9 @@ class WebPatentRun:
         self.search_round = 0
         self.external: ExternalSearchResult | None = None
         self.material_strategy: dict[str, Any] | None = None
+        self.compact_patent_memory: list[dict[str, str]] = []
+        self.compact_patent_memory_context = ""
+        self.compact_patent_memory_result: dict[str, Any] | None = None
         self.candidates: list[PatentCandidate] = []
         self.selected_candidate: PatentCandidate | None = None
         self.similarity_xlsx: Path | None = None
@@ -137,7 +189,13 @@ class WebPatentRun:
             }
         )
 
+    def _refresh_runtime_config(self) -> None:
+        self.config = load_config()
+        self.client = make_client(self.config)
+
     def advance(self) -> None:
+        self._refresh_runtime_config()
+        set_current_token_tracker(self.token_usage)
         if self.waiting_for == "material":
             self.waiting_for = None
             self.phase = "searched"
@@ -148,21 +206,30 @@ class WebPatentRun:
         try:
             if self.phase == "created":
                 self.documents = _load_documents(self.client)
-                self.material_text = _summarize_documents(self.documents)
+                self.full_knowledge_graph = build_knowledge_graph(self.client, self.documents)
+                self.knowledge_bases = build_virtual_knowledge_bases(self._knowledge_documents_json(), self.full_knowledge_graph)
+                self._activate_knowledge_base_scope()
+                self.material_text = self._knowledge_graph_material_text()
                 self.phase = "documents_loaded"
-                self.add_event("读取知识库", "已读取文档列表、处理状态和摘要。")
+                self.add_event("读取知识图谱", f"已选择“{self._selected_knowledge_base_name()}”，后续写作仅使用该图谱证据包。")
                 self.add_interaction(
                     "knowledge",
-                    "读取知识库",
+                    "读取知识图谱",
                     {
                         "counts": self.documents.get("_counts", {}),
-                        "documents": self._knowledge_documents_json(),
+                        "documents": self._active_knowledge_documents_json(),
+                        "all_documents": self._knowledge_documents_json(),
+                        "graph": self.knowledge_graph,
+                        "full_graph": self.full_knowledge_graph,
+                        "knowledge_bases": self.knowledge_bases,
+                        "selected_knowledge_base": self.selected_knowledge_base,
+                        "material_policy": "graph_only",
                     },
                 )
                 return
 
             if self.phase == "documents_loaded":
-                self.initial_assessment = _assess_materials(self._documents())
+                self.initial_assessment = _assess_materials(self._active_documents(), knowledge_graph=self.knowledge_graph)
                 self.assessment = self.initial_assessment
                 self.phase = "initial_assessed"
                 self.add_event("素材初评", self._assessment_line(self.initial_assessment))
@@ -195,7 +262,7 @@ class WebPatentRun:
                 return
 
             if self.phase == "searched":
-                self.assessment = _assess_materials(self._documents(), self.external)
+                self.assessment = _assess_materials(self._active_documents(), self.external, knowledge_graph=self.knowledge_graph)
                 self.add_event("检索后复评", self._assessment_line(self.assessment))
                 self.add_interaction("assessment", "检索后复评", asdict(self.assessment))
                 if not self._materials_ready(self.assessment):
@@ -234,10 +301,15 @@ class WebPatentRun:
                 return
 
             if self.phase == "reassessed":
+                self.compact_patent_memory = read_compact_patent_memory()
+                self.compact_patent_memory_context = format_patent_memory_for_prompt(self.compact_patent_memory)
                 self.material_strategy = build_material_strategy(
-                    self._knowledge_documents_json(),
+                    self._active_knowledge_documents_json(),
                     self._external(),
                     [],
+                    knowledge_graph=self.knowledge_graph,
+                    innovation_index=self.innovation_index,
+                    innovation_level=self.innovation_level,
                 )
                 self.add_event("素材分层", self.material_strategy.get("summary", "已完成素材分层。"))
                 self.add_interaction(
@@ -251,11 +323,18 @@ class WebPatentRun:
                     self._assessment(),
                     self._external(),
                     skill_instructions=self.skill_prompt,
+                    innovation_index=self.innovation_index,
+                    innovation_level=self.innovation_level,
+                    graph_fusion=self.material_strategy.get("graph_fusion") if self.material_strategy else None,
+                    memory_context=self.compact_patent_memory_context,
                 )
                 self.material_strategy = build_material_strategy(
-                    self._knowledge_documents_json(),
+                    self._active_knowledge_documents_json(),
                     self._external(),
                     self.candidates,
+                    knowledge_graph=self.knowledge_graph,
+                    innovation_index=self.innovation_index,
+                    innovation_level=self.innovation_level,
                 )
                 self.phase = "candidates_ready"
                 self.add_event("候选专利方向", f"已生成 {len(self.candidates)} 个候选方向。")
@@ -332,6 +411,8 @@ class WebPatentRun:
         )
 
     def handle_section_action(self, action: str, instruction: str = "", content: str = "") -> None:
+        self._refresh_runtime_config()
+        set_current_token_tracker(self.token_usage)
         if self.waiting_for != "section":
             raise ValueError("当前步骤不需要确认章节。")
 
@@ -413,8 +494,11 @@ class WebPatentRun:
         if action != "refresh":
             raise ValueError("未知素材处理操作。")
         self.documents = _load_documents(self.client)
-        self.material_text = _summarize_documents(self.documents)
-        self.assessment = _assess_materials(self._documents(), self.external)
+        self.full_knowledge_graph = build_knowledge_graph(self.client, self.documents)
+        self.knowledge_bases = build_virtual_knowledge_bases(self._knowledge_documents_json(), self.full_knowledge_graph)
+        self._activate_knowledge_base_scope()
+        self.material_text = self._knowledge_graph_material_text()
+        self.assessment = _assess_materials(self._active_documents(), self.external, knowledge_graph=self.knowledge_graph)
         self.add_event("补充后复评", self._assessment_line(self.assessment))
         self.add_interaction(
             "assessment",
@@ -432,7 +516,8 @@ class WebPatentRun:
         self.add_event("素材已达标", f"{self.assessment.score}/100，已达到候选生成门槛。")
 
     def snapshot(self) -> dict[str, Any]:
-        rows = _flatten_documents(self.documents or {})
+        rows = _flatten_documents(self.active_documents or self.documents or {})
+        all_rows = _flatten_documents(self.documents or {})
         counts = (self.documents or {}).get("_counts", {})
         return {
             "id": self.id,
@@ -441,11 +526,20 @@ class WebPatentRun:
             "waiting_for": self.waiting_for,
             "error": self.error,
             "agent_core": self.config.agent_core,
+            "innovation_index": self.innovation_index,
+            "innovation_level": self.innovation_level,
+            "innovation_level_label": innovation_level_label(self.innovation_level),
+            "knowledge_base_id": self.knowledge_base_id,
+            "selected_knowledge_base": self.selected_knowledge_base,
             "events": self.events,
             "interactions": self.interactions,
             "skills": [{"name": skill.name, "path": str(skill.path)} for skill in self.skills],
             "knowledge": {
                 "counts": counts,
+                "graph": self.knowledge_graph,
+                "full_graph": self.full_knowledge_graph,
+                "knowledge_bases": self.knowledge_bases,
+                "selected_knowledge_base": self.selected_knowledge_base,
                 "documents": [
                     {
                         "file_path": row.get("file_path", "未知"),
@@ -455,6 +549,16 @@ class WebPatentRun:
                         "content_summary": row.get("content_summary", ""),
                     }
                     for row in rows
+                ],
+                "all_documents": [
+                    {
+                        "file_path": row.get("file_path", "未知"),
+                        "id": _document_identifier(row),
+                        "status": row.get("status", "未知"),
+                        "chunks_count": row.get("chunks_count", 0),
+                        "content_summary": row.get("content_summary", ""),
+                    }
+                    for row in all_rows
                 ],
             },
             "initial_assessment": self._assessment_json(self.initial_assessment),
@@ -489,6 +593,7 @@ class WebPatentRun:
             },
             "final_quality": self.final_quality_report,
             "citations": self.citation_report,
+            "token_usage": self.token_usage.to_dict(),
             "last_confirmed_section": self._last_confirmed_section_json(),
             "next_section_name": self._next_section_name(),
             "done": self.phase == "done",
@@ -535,19 +640,40 @@ class WebPatentRun:
             self._finish()
 
     def _finish(self) -> None:
-        self.citation_report = build_citation_snapshot(
-            self.documents,
-            self._external(),
-            self.search_topic,
-        )
-        self.final_markdown = append_citation_section(
-            _assemble_document(self._selected_candidate(), self.accepted_sections),
-            self.citation_report,
-        )
-        self.final_quality_report = review_document(
-            self.final_markdown,
-            evidence_text=self.material_text + "\n" + _format_search_results(self._external()),
-        ).to_dict()
+        base_markdown = _assemble_document(self._selected_candidate(), self.accepted_sections)
+        try:
+            self.citation_report = build_citation_snapshot(
+                self.active_documents or self.documents,
+                self._external(),
+                self.search_topic,
+            )
+        except Exception as exc:  # noqa: BLE001 - citations must not block final export
+            self.citation_report = {
+                "knowledge": [],
+                "external": [],
+                "notes": [f"引用快照生成失败：{type(exc).__name__}: {exc}"],
+            }
+            self.add_event("引用快照生成失败", f"{type(exc).__name__}: {exc}")
+
+        self.final_markdown = append_citation_section(base_markdown, self.citation_report)
+        try:
+            self.final_quality_report = review_document(
+                self.final_markdown,
+                evidence_text=self.material_text + "\n" + _format_search_results(self._external()),
+            ).to_dict()
+        except Exception as exc:  # noqa: BLE001 - quality review must not block final export
+            self.final_quality_report = {
+                "score": 0,
+                "passed": False,
+                "issues": [
+                    {
+                        "message": "最终质量检查失败",
+                        "repair": f"{type(exc).__name__}: {exc}",
+                    }
+                ],
+            }
+            self.add_event("最终质量检查失败", f"{type(exc).__name__}: {exc}")
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.output_path = self.output_dir / "interactive_patent_draft.md"
         result_path = self.output_dir / "result.md"
@@ -556,9 +682,10 @@ class WebPatentRun:
         result_path.write_text(self.final_markdown, encoding="utf-8")
         try:
             export_markdown_to_docx(self.final_markdown, self.docx_path)
-        except RuntimeError as exc:
-            self.add_event("Word 导出失败", str(exc))
+        except Exception as exc:  # noqa: BLE001 - markdown files should still be downloadable
+            self.add_event("Word 导出失败", f"{type(exc).__name__}: {exc}")
             self.docx_path = None
+
         self.waiting_for = None
         self.phase = "done"
         quality_score = (self.final_quality_report or {}).get("score", 0)
@@ -567,7 +694,7 @@ class WebPatentRun:
         saved = f"已保存 {self.output_path} 和 {result_path}"
         if self.docx_path:
             saved += f"，并导出 {self.docx_path}"
-        self.add_event("保存结果", f"{saved}。历史记录已保存。")
+        self.add_event("保存结果", f"{saved}。")
         self.add_interaction(
             "complete",
             "完成并保存专利文档",
@@ -582,7 +709,30 @@ class WebPatentRun:
                 },
             },
         )
-        self.history_record = save_history_record(self)
+
+        try:
+            memory_item = summarize_candidate_for_memory(
+                self._selected_candidate(),
+                fallback_topic=self.search_topic or self._selected_knowledge_base_name(),
+            )
+            self.compact_patent_memory_result = write_compact_patent_memory(
+                title=memory_item["title"],
+                topic=memory_item["topic"],
+                idea=memory_item["idea"],
+            )
+        except Exception as exc:  # noqa: BLE001 - compact memory must not block downloads/history
+            self.compact_patent_memory_result = {
+                "saved": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self.add_event("精简记忆保存失败", f"{type(exc).__name__}: {exc}")
+
+        try:
+            self.history_record = save_history_record(self)
+            self.add_event("历史记录已保存", self.history_record.get("detail_url", ""))
+        except Exception as exc:  # noqa: BLE001 - final files should remain downloadable
+            self.add_event("历史记录保存失败", f"{type(exc).__name__}: {exc}")
+            self.error = f"历史记录保存失败：{type(exc).__name__}: {exc}"
 
     def _review_current_section(self) -> None:
         report = review_section(
@@ -621,6 +771,57 @@ class WebPatentRun:
             for row in _flatten_documents(self.documents or {})
         ]
 
+    def _active_knowledge_documents_json(self) -> list[dict[str, Any]]:
+        source = self.active_documents if self.active_documents is not None else self.documents
+        return [
+            {
+                "file_path": row.get("file_path", "未知"),
+                "id": _document_identifier(row),
+                "status": row.get("status", "未知"),
+                "chunks_count": row.get("chunks_count", 0),
+                "content_summary": row.get("content_summary", ""),
+            }
+            for row in _flatten_documents(source or {})
+        ]
+
+    def _knowledge_graph_material_text(self) -> str:
+        if not self.knowledge_graph:
+            return "暂无知识图谱。"
+        return format_knowledge_graph_for_prompt(self.knowledge_graph)
+
+    def _activate_knowledge_base_scope(self) -> None:
+        all_documents = self._knowledge_documents_json()
+        all_graph = self.full_knowledge_graph or {}
+        all_option = {
+            "id": "all",
+            "name": "总知识库",
+            "description": "使用当前 LightRAG 知识库的完整图谱，和旧版生成方式一致。",
+            "documents": all_documents,
+            "document_count": len(all_documents),
+            "graph": all_graph,
+            "node_count": len(all_graph.get("nodes", [])),
+            "edge_count": len(all_graph.get("edges", [])),
+        }
+        options = [all_option, *self.knowledge_bases]
+        selected = next((item for item in options if str(item.get("id")) == self.knowledge_base_id), None)
+        if not selected:
+            selected = all_option
+            self.knowledge_base_id = "all"
+        self.selected_knowledge_base = {
+            key: selected.get(key)
+            for key in ("id", "name", "description", "document_count", "node_count", "edge_count")
+        }
+        graph = selected.get("graph")
+        self.knowledge_graph = graph if isinstance(graph, dict) else all_graph
+        self.active_documents = _documents_from_items(
+            selected.get("documents") or all_documents,
+            (self.documents or {}).get("_counts", {}),
+        )
+
+    def _selected_knowledge_base_name(self) -> str:
+        return str((self.selected_knowledge_base or {}).get("name") or "总知识库")
+
+
     def _save_progress(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "interactive_patent_draft.md").write_text(
@@ -632,6 +833,11 @@ class WebPatentRun:
         if self.documents is None:
             raise ValueError("知识库尚未读取。")
         return self.documents
+
+    def _active_documents(self) -> dict[str, Any]:
+        if self.active_documents is not None:
+            return self.active_documents
+        return self._documents()
 
     def _external(self) -> ExternalSearchResult:
         if self.external is None:
@@ -772,24 +978,39 @@ def run_page(run_id: str) -> str:
     return render_template("workflow.html", run_id=run_id)
 
 
+@register_tool("read_compact_patent_memory", "读取精简专利生成记忆，供候选 idea 避免重复。", "Memory")
+def read_compact_patent_memory() -> list[dict[str, str]]:
+    return load_patent_memory()
+
+
+@register_tool("write_compact_patent_memory", "保存本次最终专利的精简标题、主题和 idea。", "Memory")
+def write_compact_patent_memory(title: str, topic: str, idea: str) -> dict[str, Any]:
+    return append_patent_memory(title=title, topic=topic, idea=idea)
+
+
 @app.get("/api/knowledge")
 def api_knowledge() -> Any:
     config = load_config()
-    documents = _load_documents(make_client(config))
+    client = make_client(config)
+    documents = _load_documents(client)
     rows = _flatten_documents(documents)
+    graph = build_knowledge_graph(client, documents)
+    document_items = [
+        {
+            "file_path": row.get("file_path", "未知"),
+            "id": _document_identifier(row),
+            "status": row.get("status", "未知"),
+            "chunks_count": row.get("chunks_count", 0),
+            "content_summary": row.get("content_summary", ""),
+        }
+        for row in rows
+    ]
     return jsonify(
         {
             "counts": documents.get("_counts", {}),
-            "documents": [
-                {
-                    "file_path": row.get("file_path", "未知"),
-                    "id": _document_identifier(row),
-                    "status": row.get("status", "未知"),
-                    "chunks_count": row.get("chunks_count", 0),
-                    "content_summary": row.get("content_summary", ""),
-                }
-                for row in rows
-            ],
+            "graph": graph,
+            "knowledge_bases": build_virtual_knowledge_bases(document_items, graph),
+            "documents": document_items,
         }
     )
 
@@ -811,6 +1032,19 @@ def api_upload_knowledge() -> Any:
     except LightRAGClientError as exc:
         scan_error = str(exc)
 
+    refreshed_documents = _load_documents(client)
+    graph = build_knowledge_graph(client, refreshed_documents)
+    rows = _flatten_documents(refreshed_documents)
+    document_items = [
+        {
+            "file_path": row.get("file_path", "未知"),
+            "id": _document_identifier(row),
+            "status": row.get("status", "未知"),
+            "chunks_count": row.get("chunks_count", 0),
+            "content_summary": row.get("content_summary", ""),
+        }
+        for row in rows
+    ]
     return jsonify(
         {
             "ok": True,
@@ -818,6 +1052,8 @@ def api_upload_knowledge() -> Any:
             "upload_result": upload_result,
             "scan_result": scan_result,
             "scan_error": scan_error,
+            "graph": graph,
+            "knowledge_bases": build_virtual_knowledge_bases(document_items, graph),
         }
     )
 
@@ -826,8 +1062,22 @@ def api_upload_knowledge() -> Any:
 @register_tool("clear_knowledge_base", "清空 LightRAG 当前知识库文档。", "Knowledge management")
 def api_clear_knowledge() -> Any:
     config = load_config()
-    result = make_client(config).clear_documents()
-    return jsonify({"ok": True, "result": result})
+    client = make_client(config)
+    result = client.clear_documents()
+    documents = _load_documents(client)
+    graph = build_knowledge_graph(client, documents)
+    rows = _flatten_documents(documents)
+    document_items = [
+        {
+            "file_path": row.get("file_path", "未知"),
+            "id": _document_identifier(row),
+            "status": row.get("status", "未知"),
+            "chunks_count": row.get("chunks_count", 0),
+            "content_summary": row.get("content_summary", ""),
+        }
+        for row in rows
+    ]
+    return jsonify({"ok": True, "result": result, "graph": graph, "knowledge_bases": build_virtual_knowledge_bases(document_items, graph)})
 
 
 @app.delete("/api/knowledge/documents")
@@ -842,18 +1092,35 @@ def api_delete_knowledge_documents() -> Any:
         raise ValueError("请选择至少一个要删除的文档。")
 
     config = load_config()
-    result = make_client(config).delete_documents(
+    client = make_client(config)
+    result = client.delete_documents(
         clean_ids,
         delete_file=bool(payload.get("delete_file", True)),
         delete_llm_cache=bool(payload.get("delete_llm_cache", False)),
     )
-    return jsonify({"ok": True, "deleted": clean_ids, "result": result})
+    documents = _load_documents(client)
+    graph = build_knowledge_graph(client, documents)
+    rows = _flatten_documents(documents)
+    document_items = [
+        {
+            "file_path": row.get("file_path", "未知"),
+            "id": _document_identifier(row),
+            "status": row.get("status", "未知"),
+            "chunks_count": row.get("chunks_count", 0),
+            "content_summary": row.get("content_summary", ""),
+        }
+        for row in rows
+    ]
+    return jsonify({"ok": True, "deleted": clean_ids, "result": result, "graph": graph, "knowledge_bases": build_virtual_knowledge_bases(document_items, graph)})
 
 
 @app.post("/api/runs")
 def api_create_run() -> Any:
+    payload = request.get_json(silent=True) or {}
+    innovation_level = normalize_innovation_level(payload.get("innovation_level", payload.get("innovation_index", "medium")))
+    knowledge_base_id = str(payload.get("knowledge_base_id") or "all").strip() or "all"
     config = load_config()
-    run = WebPatentRun(config)
+    run = WebPatentRun(config, innovation_level=innovation_level, knowledge_base_id=knowledge_base_id)
     with RUNS_LOCK:
         RUNS[run.id] = run
     return jsonify({"run_id": run.id, "url": f"/run/{run.id}"})
@@ -918,17 +1185,23 @@ def api_history_detail(record_id: str) -> Any:
 
 @app.get("/api/settings")
 def api_settings() -> Any:
-    skills = load_agent_skills(Path.cwd())
+    skills = load_agent_skills(resource_root())
     config = load_config()
+    config_view = user_config_view()
     return jsonify(
         {
             "agent_core": config.agent_core,
             "internal_llm": _internal_llm_label(config),
+            "user_config": {
+                "path": config_view.path,
+                "values": config_view.values,
+                "secrets": config_view.secrets,
+            },
             "skills": [
                 {
                     "name": skill.name,
                     "description": skill.description,
-                    "path": str(skill.path.relative_to(Path.cwd())),
+                    "path": _relative_resource_path(skill.path),
                 }
                 for skill in skills
             ],
@@ -937,9 +1210,31 @@ def api_settings() -> Any:
     )
 
 
+@app.post("/api/settings/runtime")
+def api_save_runtime_settings() -> Any:
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("配置内容必须是 JSON 对象。")
+    config_view = save_user_config(payload)
+    config = load_config()
+    return jsonify(
+        {
+            "ok": True,
+            "agent_core": config.agent_core,
+            "internal_llm": _internal_llm_label(config),
+            "user_config": {
+                "path": config_view.path,
+                "values": config_view.values,
+                "secrets": config_view.secrets,
+            },
+        }
+    )
+
+
 def _internal_llm_label(config: AppConfig) -> str:
     if config.agent_core in {"pi", "pi_coding", "pi_coding_agent", "pi-coding-agent"}:
-        return f"{config.pi_provider}/{config.pi_model or 'default'}"
+        details = "/".join(part for part in (config.pi_provider, config.pi_model) if part)
+        return f"Pi Agent / {details}" if details else "Pi Agent / 使用本机默认配置"
     if config.agent_core in {"codex", "codex_cli", "codex-cli"}:
         return f"codex/{config.codex_model or 'default'}"
     if config.llm_provider and config.llm_provider != "none":
@@ -947,9 +1242,16 @@ def _internal_llm_label(config: AppConfig) -> str:
     return "未配置独立 LLM"
 
 
+def _relative_resource_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(resource_root()))
+    except ValueError:
+        return str(path)
+
+
 @app.route("/outputs/<path:filename>")
 def output_file(filename: str) -> Any:
-    as_download = Path(filename).suffix.lower() in {".docx", ".xlsx"}
+    as_download = Path(filename).suffix.lower() in {".docx", ".xlsx", ".md"}
     return send_from_directory(OUTPUT_DIR, filename, as_attachment=as_download)
 
 
@@ -987,7 +1289,7 @@ def load_history_record(record_id: str) -> dict[str, Any] | None:
 
 
 def _with_material_strategy(record: dict[str, Any]) -> dict[str, Any]:
-    if record.get("material_strategy"):
+    if record.get("material_strategy") and record["material_strategy"].get("fusion_blueprint") and record["material_strategy"].get("graph_fusion"):
         return record
     knowledge = record.get("knowledge") or {}
     external = record.get("external") or {}
@@ -1008,6 +1310,9 @@ def _with_material_strategy(record: dict[str, Any]) -> dict[str, Any]:
             results=external.get("results") or [],
         ),
         candidates=candidates,
+        knowledge_graph=knowledge.get("graph") if isinstance(knowledge.get("graph"), dict) else None,
+        innovation_index=_int_between(record.get("innovation_index"), 50, 0, 100),
+        innovation_level=normalize_innovation_level(record.get("innovation_level", record.get("innovation_index", "medium"))),
     )
     return record
 
@@ -1027,13 +1332,25 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
         "similarity_markdown": _copy_history_artifact(run.similarity_markdown, record_dir, "similar_patent_analysis.md"),
         "similarity_xlsx": _copy_history_artifact(run.similarity_xlsx, record_dir, "similar_patent_analysis.xlsx"),
     }
+    token_usage = run.token_usage.to_dict()
+    (record_dir / "token_usage_report.md").write_text(
+        markdown_report(token_usage),
+        encoding="utf-8",
+    )
+    artifacts["token_usage_report"] = f"/outputs/history/{record_dir.name}/token_usage_report.md"
     record = {
         "id": record_id,
         "run_id": run.id,
+        "detail_url": f"/history/{record_id}",
         "created_at": run.created_at,
         "completed_at": completed_at,
         "title": run.selected_candidate.title if run.selected_candidate else "未命名专利方案",
         "agent_core": run.config.agent_core,
+        "innovation_index": run.innovation_index,
+        "innovation_level": run.innovation_level,
+        "innovation_level_label": innovation_level_label(run.innovation_level),
+        "knowledge_base_id": run.knowledge_base_id,
+        "selected_knowledge_base": run.selected_knowledge_base,
         "assessment": asdict(run.assessment) if run.assessment else None,
         "initial_assessment": asdict(run.initial_assessment) if run.initial_assessment else None,
         "search_topic": run.search_topic,
@@ -1053,7 +1370,12 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
         "tools": [tool.to_dict() for tool in registered_tools()],
         "knowledge": {
             "counts": (run.documents or {}).get("_counts", {}),
-            "documents": run._knowledge_documents_json(),
+            "graph": run.knowledge_graph,
+            "full_graph": run.full_knowledge_graph,
+            "knowledge_bases": run.knowledge_bases,
+            "selected_knowledge_base": run.selected_knowledge_base,
+            "documents": run._active_knowledge_documents_json(),
+            "all_documents": run._knowledge_documents_json(),
         },
         "external": {
             "topic": run.search_topic,
@@ -1073,6 +1395,7 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
             for index, content in enumerate(run.accepted_sections)
         ],
         "final_quality": run.final_quality_report,
+        "token_usage": token_usage,
     }
     (record_dir / "record.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=2),
@@ -1088,6 +1411,11 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
             "completed_at",
             "title",
             "agent_core",
+            "innovation_index",
+            "innovation_level",
+            "innovation_level_label",
+            "knowledge_base_id",
+            "selected_knowledge_base",
             "assessment",
             "initial_assessment",
             "search_topic",
@@ -1097,6 +1425,7 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
             "final_quality",
         )
     }
+    summary["token_usage_summary"] = token_usage.get("summary", {})
     summary["detail_url"] = f"/history/{record_id}"
     records = [summary, *[item for item in load_history_records() if item.get("id") != record_id]]
     HISTORY_INDEX.write_text(
@@ -1112,6 +1441,29 @@ def _copy_history_artifact(source: Path | None, target_dir: Path, filename: str)
     target = target_dir / filename
     shutil.copy2(source, target)
     return f"/outputs/history/{target_dir.name}/{filename}"
+
+
+def _int_between(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _documents_from_items(items: list[dict[str, Any]], counts: dict[str, Any] | None = None) -> dict[str, Any]:
+    statuses: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "processed")
+        row = dict(item)
+        row.pop("status", None)
+        statuses.setdefault(status, []).append(row)
+    return {
+        "statuses": statuses,
+        "_counts": counts or {},
+    }
 
 
 def find_available_port(host: str = "127.0.0.1", preferred: int = 5000) -> int:

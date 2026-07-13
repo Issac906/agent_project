@@ -33,6 +33,7 @@
 
     <script>
       const recordId = "{{ record_id }}";
+      let currentRecord = null;
       const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
       }[c]));
@@ -76,13 +77,13 @@
         }
         const layers = strategy.layers || [];
         const paths = strategy.candidate_paths || [];
+        const overview = strategy.fusion_overview || {};
         return `
           <div class="material-map">
             <div class="material-map-head">
               <div>
                 <h3>素材分层与组合依据</h3>
                 <p>${escapeHtml(strategy.summary || "系统已按材料用途完成分层。")}</p>
-                ${strategy.external_usage_boundary ? `<p><strong>${escapeHtml(strategy.external_usage_boundary)}</strong></p>` : ""}
               </div>
             </div>
             <div class="material-layer-grid">
@@ -100,11 +101,6 @@
                 </article>
               `).join("")}
             </div>
-            ${(strategy.combination_rules || []).length ? `
-              <div class="combination-rules">
-                ${(strategy.combination_rules || []).map((rule) => `<p>${escapeHtml(rule)}</p>`).join("")}
-              </div>
-            ` : ""}
             ${paths.length ? `
               <div class="candidate-path-list">
                 <h3>候选 idea 的素材组合路径</h3>
@@ -115,11 +111,278 @@
                     <div class="path-tags">
                       ${(path.source_layers || []).map((layer) => `<span>${escapeHtml(layer.name)}</span>`).join("")}
                     </div>
+                    ${candidateFusionDetails(path)}
                   </article>
                 `).join("")}
               </div>
             ` : ""}
           </div>
+        `;
+      }
+
+      function graphFusionSection(fusion) {
+        if (!fusion || !(fusion.selected_nodes || []).length) return "";
+        const completedFusion = completeFusionPath(fusion);
+        const distance = completedFusion.distance ?? completedFusion.node_path_distance ?? "-";
+        const intermediate = completedFusion.intermediate_node_count ?? 0;
+        const levelText = completedFusion.innovation_level_label || ({ low: "低", medium: "中", high: "高" }[completedFusion.innovation_level] || "");
+        const usedCount = (completedFusion.selected_nodes || []).length;
+        return `
+          <div class="graph-fusion-block">
+            <div class="registry-head">
+              <strong>该 idea 使用的图谱路径</strong>
+              ${levelText ? `<span>探索范围 ${escapeHtml(levelText)}</span>` : ""}
+            </div>
+            <div class="graph-path-meta">
+              <span>高亮引用节点：${escapeHtml(String(usedCount))}</span>
+              <span>图谱距离：${escapeHtml(distance === null || distance === undefined ? "未连通" : String(distance))}</span>
+              <span>中间节点：${escapeHtml(String(intermediate))}</span>
+            </div>
+            <p>${escapeHtml(completedFusion.reason || "")}</p>
+            ${miniGraph(completedFusion)}
+          </div>
+        `;
+      }
+
+      function completeFusionPath(fusion) {
+        const selected = fusion.selected_nodes || [];
+        const existingPath = fusion.path_nodes || [];
+        if (existingPath.length > selected.length || selected.length < 2) return fusion;
+        const start = String(selected[0].id || "");
+        const end = String(selected[1].id || "");
+        if (!start || !end) return fusion;
+        const graphCandidates = [currentRecord?.knowledge?.graph, currentRecord?.knowledge?.full_graph].filter(Boolean);
+        let graphNodes = [];
+        let graphEdges = [];
+        let pathIds = [];
+        for (const graph of graphCandidates) {
+          graphNodes = (graph.nodes || []).filter((node) => node && node.id);
+          graphEdges = (graph.edges || []).filter((edge) => edge && edge.source && edge.target);
+          if (!graphNodes.length || !graphEdges.length) continue;
+          pathIds = shortestGraphPath(start, end, graphEdges);
+          if (pathIds.length > 2) break;
+        }
+        if (pathIds.length <= 2) return fusion;
+        const nodeById = new Map(graphNodes.map((node) => [String(node.id), node]));
+        const pathNodes = pathIds.map((id) => publicGraphNode(nodeById.get(id) || { id })).filter(Boolean);
+        const pathEdges = [];
+        for (let i = 0; i < pathIds.length - 1; i += 1) {
+          const edge = graphEdges.find((item) => {
+            const source = String(item.source);
+            const target = String(item.target);
+            return (source === pathIds[i] && target === pathIds[i + 1]) || (source === pathIds[i + 1] && target === pathIds[i]);
+          });
+          if (edge) pathEdges.push(publicGraphEdge(edge, nodeById));
+        }
+        return {
+          ...fusion,
+          path_nodes: pathNodes,
+          path_edges: pathEdges,
+          distance: pathIds.length - 1,
+          intermediate_node_count: Math.max(0, pathIds.length - 2),
+        };
+      }
+
+      function shortestGraphPath(start, end, edges) {
+        const adjacency = new Map();
+        edges.forEach((edge) => {
+          const source = String(edge.source);
+          const target = String(edge.target);
+          if (!adjacency.has(source)) adjacency.set(source, new Set());
+          if (!adjacency.has(target)) adjacency.set(target, new Set());
+          adjacency.get(source).add(target);
+          adjacency.get(target).add(source);
+        });
+        const queue = [[start]];
+        const seen = new Set([start]);
+        while (queue.length) {
+          const path = queue.shift();
+          const node = path[path.length - 1];
+          if (path.length > 10) continue;
+          for (const next of adjacency.get(node) || []) {
+            if (seen.has(next)) continue;
+            const nextPath = [...path, next];
+            if (next === end) return nextPath;
+            seen.add(next);
+            queue.push(nextPath);
+          }
+        }
+        return [];
+      }
+
+      function publicGraphNode(node) {
+        if (!node) return null;
+        return {
+          id: String(node.id || ""),
+          label: String(node.label || node.full_label || node.id || ""),
+          full_label: String(node.full_label || node.label || node.id || ""),
+          type: String(node.type || node.native_type || "concept"),
+          native_type: String(node.native_type || ""),
+          summary: String(node.summary || ""),
+          file_path: String(node.file_path || ""),
+          source_id: String(node.source_id || ""),
+          degree: Number(node.degree || 0),
+        };
+      }
+
+      function publicGraphEdge(edge, nodeById) {
+        const source = String(edge.source || "");
+        const target = String(edge.target || "");
+        const sourceNode = nodeById.get(source) || {};
+        const targetNode = nodeById.get(target) || {};
+        return {
+          source,
+          target,
+          source_label: String(edge.source_label || sourceNode.full_label || sourceNode.label || source),
+          target_label: String(edge.target_label || targetNode.full_label || targetNode.label || target),
+          label: String(edge.label || "关联"),
+        };
+      }
+
+      function miniGraph(fusion) {
+        const nodes = (fusion.path_nodes || []).length ? fusion.path_nodes : (fusion.selected_nodes || []);
+        const edges = (fusion.path_edges || []).length ? fusion.path_edges : (fusion.selected_edges || []);
+        if (!nodes.length) return "";
+        const usedIds = new Set((fusion.selected_nodes || []).map((node) => String(node.id)));
+        const width = 820;
+        const height = 300;
+        const startX = 88;
+        const endX = width - 88;
+        const cy = height / 2;
+        const positioned = nodes.map((node, index) => {
+          const ratio = nodes.length === 1 ? 0.5 : index / (nodes.length - 1);
+          const wave = Math.sin(ratio * Math.PI * 2) * 28;
+          return {
+            ...node,
+            x: startX + (endX - startX) * ratio,
+            y: cy + wave,
+            r: Math.max(9, Math.min(24, 10 + Number(node.degree || 0) * 1.5)),
+          };
+        });
+        const nodeById = new Map(positioned.map((node) => [node.id, node]));
+        const visibleEdges = edges
+          .map((edge) => ({ ...edge, sourceNode: nodeById.get(edge.source), targetNode: nodeById.get(edge.target) }))
+          .filter((edge) => edge.sourceNode && edge.targetNode);
+        return `
+          <svg class="history-mini-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="本次使用的知识图谱节点">
+            ${visibleEdges.map((edge, index) => {
+              const a = edge.sourceNode;
+              const b = edge.targetNode;
+              const mx = (a.x + b.x) / 2;
+              const my = (a.y + b.y) / 2 - 18;
+              return `<path class="kg-network-edge" d="M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}"><title>${escapeHtml(edge.source_label || edge.source)} ${escapeHtml(edge.label || "关联")} ${escapeHtml(edge.target_label || edge.target)}</title></path>`;
+            }).join("")}
+            ${positioned.map((node) => {
+              const isUsed = usedIds.has(String(node.id)) || !usedIds.size;
+              const nodePayload = {
+                id: node.id,
+                label: node.full_label || node.label || node.id,
+                type: node.native_type || node.type || "entity",
+                summary: node.summary || "",
+                file_path: node.file_path || "",
+                source_id: node.source_id || ""
+              };
+              return `
+              <g class="kg-network-node ${escapeHtml(node.type || "concept")} ${isUsed ? "used-reference" : "bridge-reference"}" ${isUsed ? `data-mini-node="${escapeHtml(node.id)}" tabindex="0" role="button"` : ""} transform="translate(${node.x.toFixed(1)}, ${node.y.toFixed(1)})">
+                <circle r="${node.r.toFixed(1)}"></circle>
+                <title>${escapeHtml(isUsed ? "引用节点" : "路径中间节点")}：${escapeHtml(node.full_label || node.label || node.id)}\n${escapeHtml(node.summary || "")}</title>
+                <text x="${node.r + 7}" y="4">${escapeHtml(shortText(node.full_label || node.label || node.id, 18))}</text>
+                ${isUsed ? `<desc>${escapeHtml(JSON.stringify(nodePayload))}</desc>` : ""}
+              </g>
+            `}).join("")}
+          </svg>
+          <div class="kg-node-detail hidden mini-node-detail"></div>
+        `;
+      }
+
+      function shortText(value, limit) {
+        const text = String(value || "");
+        return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+      }
+
+      function bindMiniGraphDetails(root) {
+        root.querySelectorAll("[data-mini-node]").forEach((element) => {
+          let node = {};
+          try {
+            node = JSON.parse(element.querySelector("desc")?.textContent || "{}");
+          } catch {
+            node = {};
+          }
+          if (!node) return;
+          const open = () => {
+            const detail = element.closest(".graph-fusion-block")?.querySelector(".mini-node-detail");
+            if (!detail) return;
+            detail.className = "kg-node-detail mini-node-detail";
+            detail.innerHTML = `
+              <div class="kg-detail-head">
+                <div>
+                  <span>${escapeHtml(node.type || "entity")}</span>
+                  <h4>${escapeHtml(node.label || node.id)}</h4>
+                </div>
+              </div>
+              <p>${escapeHtml(node.summary || "该节点暂无详细说明。")}</p>
+              ${node.file_path ? `<div class="kg-detail-meta"><strong>来源文档</strong><span>${escapeHtml(node.file_path)}</span></div>` : ""}
+              ${node.source_id ? `<div class="kg-detail-meta"><strong>来源片段</strong><span>${escapeHtml(node.source_id)}</span></div>` : ""}
+            `;
+          };
+          element.addEventListener("click", open);
+          element.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              open();
+            }
+          });
+        });
+      }
+
+      function candidateFusionDetails(path) {
+        const steps = path.fusion_steps || [];
+        const matrix = path.contribution_matrix || [];
+        const risks = path.risk_controls || [];
+        if (!steps.length && !matrix.length && !risks.length) return "";
+        return `
+          <details class="candidate-fusion-details">
+            <summary>展开融合证据链</summary>
+            ${graphFusionSection({
+              innovation_index: path.innovation_index,
+              innovation_level: path.innovation_level,
+              innovation_level_label: path.innovation_level_label,
+              policy: path.node_fusion_policy,
+              reason: path.node_fusion_reason,
+              distance: path.node_path_distance,
+              intermediate_node_count: path.intermediate_node_count,
+              selected_nodes: path.used_graph_nodes || [],
+              selected_edges: path.used_graph_edges || [],
+              bridge_nodes: path.bridge_graph_nodes || [],
+              primary_pair: path.primary_graph_nodes || path.used_graph_nodes || [],
+              path_nodes: path.path_nodes || path.used_graph_nodes || [],
+              path_edges: path.path_edges || path.used_graph_edges || []
+            })}
+            ${steps.length ? `
+              <div class="fusion-detail-grid">
+                ${steps.map((step) => `
+                  <div class="fusion-detail-card">
+                    <strong>${escapeHtml(step.name)}</strong>
+                    <p>${escapeHtml(step.explanation || "")}</p>
+                    <div class="material-source-list">${(step.evidence || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>图谱综合证据</span>"}</div>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+            ${matrix.length ? `
+              <div class="fusion-matrix">
+                ${matrix.map((row) => `
+                  <div>
+                    <strong>${escapeHtml(row.layer)} · ${escapeHtml(row.role)}</strong>
+                    <p>${escapeHtml(row.meaning || "")}</p>
+                    <div class="material-source-list">${(row.sources || []).map((source) => `<span>${escapeHtml(source)}</span>`).join("")}</div>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+            ${path.non_reuse_boundary ? `<p class="fusion-boundary">不可复用边界：${escapeHtml(path.non_reuse_boundary)}</p>` : ""}
+            ${risks.length ? `<ul class="fusion-risk-list">${risks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+          </details>
         `;
       }
 
@@ -163,9 +426,16 @@
           ).join("")}</div>`);
         }
         if (payload.candidates?.length) {
-          blocks.push(`<div class="interaction-data-list">${payload.candidates.map((candidate, index) =>
-            `<span>${index + 1}. ${escapeHtml(candidate.title)}</span>`
-          ).join("")}</div>`);
+          if (payload.material_strategy) {
+            blocks.push(materialStrategySection({ material_strategy: payload.material_strategy }));
+          }
+          blocks.push(`<div class="history-process-grid">${candidateCards({
+            candidates: payload.candidates,
+            selected_candidate: currentRecord?.selected_candidate || payload.selected
+          })}</div>`);
+        }
+        if (payload.fusion_overview || payload.graph_fusion || item.kind === "material_strategy") {
+          blocks.push(materialStrategySection({ material_strategy: payload }));
         }
         if (payload.selected?.title) {
           blocks.push(`<p>选择结果：${escapeHtml(payload.selected.title)}</p>`);
@@ -179,16 +449,26 @@
         if (payload.quality) {
           blocks.push(`<p>质量检查：${payload.quality.score ?? "-"} / 100，${payload.quality.passed ? "通过" : "存在待处理项"}</p>`);
         }
+        if (payload.final_quality) {
+          blocks.push(`<p>最终质量检查：${payload.final_quality.score ?? "-"} / 100，${payload.final_quality.passed ? "通过" : "存在待处理项"}</p>`);
+        }
+        if (payload.citations) {
+          blocks.push(citationSection({ citations: payload.citations }));
+        }
+        if (payload.artifacts) {
+          blocks.push(`<div class="artifact-row">${artifactLinks(payload.artifacts) || "暂无文件"}</div>`);
+        }
         return blocks.join("");
       }
 
       function artifactLinks(artifacts) {
         return Object.entries({
           docx: "Word 文档",
-          draft: "交互草稿",
-          result: "result.md",
+          result: "最终 Markdown",
+          draft: "交互草稿 Markdown",
+          similarity_xlsx: "差异分析 Excel",
           similarity_markdown: "差异分析 Markdown",
-          similarity_xlsx: "差异分析 Excel"
+          token_usage_report: "Token 报告"
         }).filter(([key]) => artifacts?.[key]).map(([key, label]) =>
           `<a href="${artifacts[key]}" target="_blank">${label}</a>`
         ).join("");
@@ -233,44 +513,29 @@
       async function loadRecord() {
         const response = await fetch(`/api/history/${recordId}`);
         const record = await response.json();
+        currentRecord = record;
         document.getElementById("recordTitle").textContent = record.title || "历史详情";
         document.getElementById("recordContent").innerHTML = `
           <div class="history-detail-summary">
             <div><span>开始时间</span><strong>${escapeHtml((record.created_at || "-").replace("T", " "))}</strong></div>
             <div><span>完成时间</span><strong>${escapeHtml((record.completed_at || "-").replace("T", " "))}</strong></div>
             <div><span>Agent 核</span><strong>${escapeHtml(record.agent_core || "-")}</strong></div>
+            <div><span>探索档位</span><strong>${escapeHtml(record.innovation_level_label || ({ low: "低", medium: "中", high: "高" }[record.innovation_level] || "-"))}</strong></div>
+            <div><span>使用图谱</span><strong>${escapeHtml(record.selected_knowledge_base?.name || "总知识库")}</strong></div>
             <div><span>最终选择</span><strong>${escapeHtml(record.selected_candidate?.title || record.title || "-")}</strong></div>
           </div>
           <section class="history-detail-section">
-            <h2>Idea 生成前的素材组合图谱</h2>
-            ${materialStrategySection(record)}
-          </section>
-          <section class="history-detail-section">
-            <h2>候选专利 Ideas</h2>
-            <div class="history-process-grid">${candidateCards(record)}</div>
+            <h2>生成文件</h2>
+            <div class="artifact-row">${artifactLinks(record.artifacts) || "暂无可下载文件"}</div>
           </section>
           <section class="history-detail-section">
             <h2>完整交互过程</h2>
             <div class="interaction-list">${interactionCards(record)}</div>
           </section>
-          <section class="history-detail-section">
-            <h2>已确认章节</h2>
-            ${(record.accepted_sections || []).map((section) => `
-              <details class="history-section-detail">
-                <summary>${escapeHtml(section.name)}</summary>
-                <div class="history-rich-text">${markdownText(section.content)}</div>
-              </details>
-            `).join("") || '<div class="empty">该记录未保存章节过程。</div>'}
-          </section>
-          <section class="history-detail-section">
-            <h2>引用说明</h2>
-            ${citationSection(record)}
-          </section>
-          <section class="history-detail-section">
-            <h2>结果文件</h2>
-            <div class="artifact-row">${artifactLinks(record.artifacts) || "暂无文件"}</div>
-          </section>
         `;
+        document.querySelectorAll(".graph-fusion-block").forEach((block) => {
+          bindMiniGraphDetails(block);
+        });
         if (window.MathJax?.typesetPromise) {
           await MathJax.typesetPromise([document.getElementById("recordContent")]);
         }

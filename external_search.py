@@ -93,10 +93,10 @@ def _configured_searchers() -> list[tuple[str, Any]]:
     api_key = _search_api_key()
     searchers: list[tuple[str, Any]] = []
 
-    if provider in {"anysearch", "any_search"} or (
-        api_key and os.getenv("ANYSEARCH_BASE_URL")
+    if provider in {"search_api", "searchapi", "external_api", "api", "anysearch", "any_search"} or (
+        api_key and (os.getenv("SEARCH_BASE_URL") or os.getenv("SEARCH_ENDPOINT") or os.getenv("ANYSEARCH_BASE_URL"))
     ):
-        searchers.append(("AnySearch", _search_anysearch_api))
+        searchers.append(("SearchAPI", _search_anysearch_api))
 
     searchers.extend(
         [
@@ -111,9 +111,9 @@ def _search_anysearch_api(query: str, max_results: int) -> list[dict[str, str]]:
     api_key = _search_api_key()
     endpoint = _anysearch_endpoint()
     if not api_key:
-        raise ValueError("SEARCH_API_KEY is required for AnySearch")
+        raise ValueError("SEARCH_API_KEY is required for external search API")
     if not endpoint:
-        raise ValueError("ANYSEARCH_BASE_URL or SEARCH_BASE_URL is required for AnySearch")
+        raise ValueError("SEARCH_BASE_URL or SEARCH_ENDPOINT is required for external search API")
 
     headers = {
         "Accept": "application/json",
@@ -128,7 +128,7 @@ def _search_anysearch_api(query: str, max_results: int) -> list[dict[str, str]]:
         "max_results": max_results,
         "num_results": max_results,
     }
-    method = os.getenv("ANYSEARCH_METHOD", "POST").strip().upper()
+    method = (os.getenv("SEARCH_METHOD") or os.getenv("ANYSEARCH_METHOD") or "POST").strip().upper()
     if method == "GET":
         response = requests.get(
             endpoint,
@@ -171,9 +171,10 @@ def _safe_error_message(exc: Exception) -> str:
 
 def _anysearch_endpoint() -> str | None:
     endpoint = (
-        os.getenv("ANYSEARCH_ENDPOINT")
-        or os.getenv("ANYSEARCH_BASE_URL")
+        os.getenv("SEARCH_ENDPOINT")
         or os.getenv("SEARCH_BASE_URL")
+        or os.getenv("ANYSEARCH_ENDPOINT")
+        or os.getenv("ANYSEARCH_BASE_URL")
     )
     if not endpoint or not endpoint.strip():
         return None
@@ -409,10 +410,10 @@ def _parse_anysearch_results(payload: Any, max_results: int) -> list[dict[str, s
             continue
         results.append(
             {
-                "title": _clean_html(title or url or "AnySearch 检索结果"),
+                "title": _clean_html(title or url or "外部搜索结果"),
                 "url": url,
                 "snippet": _clean_html(snippet),
-                "source": "AnySearch",
+                "source": "SearchAPI",
             }
         )
     return results

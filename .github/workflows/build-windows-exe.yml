@@ -1,0 +1,50 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path "requirements.txt") {
+            python -m pip install -r requirements.txt
+          }
+          python -m pip install pyinstaller pywebview
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          .\scripts\build_windows_exe.ps1
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist\PatentAgent.exe release\PatentAgent.exe
+          Compress-Archive -Path release\PatentAgent.exe -DestinationPath release\PatentAgent-Windows.zip -Force
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PatentAgent-Windows
+          path: |
+            release/PatentAgent.exe
+            release/PatentAgent-Windows.zip
