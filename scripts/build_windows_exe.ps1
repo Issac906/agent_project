@@ -22,13 +22,15 @@ if (Test-Path "dist") { Remove-Item "dist" -Recurse -Force }
 python -m PyInstaller `
   --noconfirm `
   --noconsole `
-  --onefile `
+  --onedir `
   --name $AppName `
   --add-data "templates;templates" `
   --add-data "static;static" `
   --add-data "skills;skills" `
+  --exclude-module PIL._avif `
   --hidden-import webview `
   --hidden-import webview.platforms.winforms `
   desktop_launcher.py
 
-Write-Host "已生成：dist\$AppName.exe"
+Write-Host "已生成：dist\$AppName\$AppName.exe"
+Write-Host "发布时请保留 dist\$AppName 整个目录，不要只复制 exe。"

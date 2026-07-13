@@ -40,12 +40,20 @@ Actions -> Build Windows EXE -> Run workflow
 PatentAgent-Windows
 ```
 
-里面包含：
+GitHub 会下载一个 `PatentAgent-Windows.zip`。完整解压后，里面包含：
 
 ```text
-PatentAgent.exe
-PatentAgent-Windows.zip
+PatentAgent\PatentAgent.exe
+PatentAgent\_internal\...
 ```
+
+运行：
+
+```text
+PatentAgent\PatentAgent.exe
+```
+
+不要只复制 `PatentAgent.exe`。Windows 版本采用便携目录打包，以避免单文件程序启动时解压原生依赖失败；`PatentAgent` 目录中的 `_internal` 等文件必须与 exe 保持在一起。
 
 ### 方案 B：Windows 本机手动构建
 
@@ -59,7 +67,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 产物：
 
 ```text
-dist\PatentAgent.exe
+dist\PatentAgent\PatentAgent.exe
 ```
 
 ## API 配置

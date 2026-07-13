@@ -38,13 +38,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item dist\PatentAgent.exe release\PatentAgent.exe
-          Compress-Archive -Path release\PatentAgent.exe -DestinationPath release\PatentAgent-Windows.zip -Force
+          Copy-Item dist\PatentAgent release\PatentAgent -Recurse
 
-      - name: Upload exe artifact
+      - name: Upload Windows portable package
         uses: actions/upload-artifact@v4
         with:
           name: PatentAgent-Windows
-          path: |
-            release/PatentAgent.exe
-            release/PatentAgent-Windows.zip
+          path: release/PatentAgent
