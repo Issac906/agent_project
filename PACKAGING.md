@@ -34,10 +34,10 @@ Windows exe 需要在 Windows 环境构建，不能直接在 macOS 上用 PyInst
 Actions -> Build Windows EXE -> Run workflow
 ```
 
-构建完成后，在该 workflow run 的 `Artifacts` 中下载：
+构建完成后，在最新的 `Windows portable build #...` workflow run 底部下载：
 
 ```text
-PatentAgent-Windows
+PatentAgent-Windows-<运行编号>
 ```
 
 GitHub 会下载一个 `PatentAgent-Windows.zip`。完整解压后，里面包含：
@@ -54,6 +54,8 @@ PatentAgent\PatentAgent.exe
 ```
 
 不要只复制 `PatentAgent.exe`。Windows 版本采用便携目录打包，以避免单文件程序启动时解压原生依赖失败；`PatentAgent` 目录中的 `_internal` 等文件必须与 exe 保持在一起。
+
+`BUILD_INFO.txt` 会记录对应的 Git commit 和 Actions 运行编号。构建流程会检查 `_internal` 目录，并拒绝上传含有不兼容 Pillow AVIF 原生扩展的包。
 
 ### 方案 B：Windows 本机手动构建
 

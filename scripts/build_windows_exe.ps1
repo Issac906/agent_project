@@ -32,5 +32,15 @@ python -m PyInstaller `
   --hidden-import webview.platforms.winforms `
   desktop_launcher.py
 
+$AvifFiles = @(Get-ChildItem "dist\$AppName" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*_avif*.pyd" })
+if ($AvifFiles.Count -gt 0) {
+  $AvifFiles | ForEach-Object { Write-Host "检测到不兼容文件：$($_.FullName)" }
+  throw "Windows 发布包中仍包含 Pillow AVIF 原生扩展，已停止发布。"
+}
+
+if (-not (Test-Path "dist\$AppName\_internal")) {
+  throw "Windows 构建不是便携目录版：缺少 dist\$AppName\_internal。"
+}
+
 Write-Host "已生成：dist\$AppName\$AppName.exe"
 Write-Host "发布时请保留 dist\$AppName 整个目录，不要只复制 exe。"

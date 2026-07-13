@@ -1,8 +1,11 @@
 name: Build Windows EXE
+run-name: "Windows portable build #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -39,9 +42,28 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
           Copy-Item dist\PatentAgent release\PatentAgent -Recurse
+          @"
+          PatentAgent Windows portable build
+          Commit: $env:GITHUB_SHA
+          Run: $env:GITHUB_RUN_NUMBER
+          Packaging: onedir
+          Pillow AVIF extension: excluded
+          "@ | Set-Content release\PatentAgent\BUILD_INFO.txt -Encoding UTF8
+
+          if (-not (Test-Path release\PatentAgent\PatentAgent.exe)) {
+            throw "PatentAgent.exe is missing from the portable package."
+          }
+          if (-not (Test-Path release\PatentAgent\_internal)) {
+            throw "Portable package is missing the _internal directory."
+          }
+          $AvifFiles = @(Get-ChildItem release\PatentAgent -Recurse -File | Where-Object { $_.Name -like "*_avif*.pyd" })
+          if ($AvifFiles.Count -gt 0) {
+            throw "Portable package unexpectedly contains Pillow AVIF binaries."
+          }
 
       - name: Upload Windows portable package
         uses: actions/upload-artifact@v4
         with:
-          name: PatentAgent-Windows
-          path: release/PatentAgent
+          name: PatentAgent-Windows-${{ github.run_number }}
+          path: release
+          if-no-files-found: error
