@@ -22,6 +22,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -47,19 +52,56 @@ jobs:
           Commit: $env:GITHUB_SHA
           Run: $env:GITHUB_RUN_NUMBER
           Packaging: onedir
+          AI integration: PatentAgentMCP\PatentAgentMCP.exe --mcp
           Pillow AVIF extension: excluded
           "@ | Set-Content release\PatentAgent\BUILD_INFO.txt -Encoding UTF8
 
           if (-not (Test-Path release\PatentAgent\PatentAgent.exe)) {
             throw "PatentAgent.exe is missing from the portable package."
           }
+          if (-not (Test-Path release\PatentAgent\PatentAgentMCP\PatentAgentMCP.exe)) {
+            throw "PatentAgentMCP.exe is missing from the portable package."
+          }
           if (-not (Test-Path release\PatentAgent\_internal)) {
             throw "Portable package is missing the _internal directory."
+          }
+          if (-not (Test-Path release\PatentAgent\PatentAgentMCP\_internal)) {
+            throw "MCP portable package is missing the _internal directory."
+          }
+          if (-not (Test-Path release\PatentAgent\Register-Codex.cmd)) {
+            throw "Codex registration script is missing."
+          }
+          if (-not (Test-Path release\PatentAgent\pi-runtime\node.exe)) {
+            throw "Bundled Node.js is missing."
+          }
+          if (-not (Test-Path release\PatentAgent\pi-runtime\node_modules\@earendil-works\pi-coding-agent\dist\cli.js)) {
+            throw "Bundled Pi Coding Agent is missing."
           }
           $AvifFiles = @(Get-ChildItem release\PatentAgent -Recurse -File | Where-Object { $_.Name -like "*_avif*.pyd" })
           if ($AvifFiles.Count -gt 0) {
             throw "Portable package unexpectedly contains Pillow AVIF binaries."
           }
+
+      - name: Verify AI integration executable
+        shell: pwsh
+        run: |
+          $ToolJson = & release\PatentAgent\PatentAgentMCP\PatentAgentMCP.exe --cli tools
+          if ($LASTEXITCODE -ne 0) {
+            throw "PatentAgentMCP CLI failed with exit code $LASTEXITCODE."
+          }
+          $ToolData = $ToolJson | ConvertFrom-Json
+          $ToolNames = @($ToolData.tools | ForEach-Object { $_.name })
+          foreach ($Required in @("patent_start_run", "patent_list_active_runs", "patent_select_idea", "patent_accept_section", "patent_list_history")) {
+            if ($Required -notin $ToolNames) {
+              throw "Required MCP tool is missing: $Required"
+            }
+          }
+          Write-Host "Verified $($ToolNames.Count) Patent Agent MCP tools."
+          $NodeVersion = & release\PatentAgent\pi-runtime\node.exe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled Node.js failed to start."
+          }
+          Write-Host "Verified bundled Node.js: $NodeVersion"
 
       - name: Upload Windows portable package
         uses: actions/upload-artifact@v4

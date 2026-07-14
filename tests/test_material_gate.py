@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app import MATERIAL_READY_SCORE, WebPatentRun
+from app import MAX_SEARCH_NO_PROGRESS_ROUNDS, MATERIAL_READY_SCORE, WebPatentRun
 from config import AppConfig
 from external_search import ExternalSearchResult
 from patent_discovery_agent import MaterialAssessment
@@ -112,6 +112,39 @@ class MaterialGateTests(unittest.TestCase):
         self.assertEqual(21, run.search_round)
         search.assert_called_once()
         generate_candidates.assert_not_called()
+
+    def test_repeated_empty_search_stops_with_recoverable_error(self) -> None:
+        run = WebPatentRun(_config())
+        run.phase = "searched"
+        run.search_round = 2
+        run.search_no_progress_rounds = MAX_SEARCH_NO_PROGRESS_ROUNDS - 1
+        run.search_topic = "铝电解槽状态检测"
+        run.documents = {"_counts": {}, "rows": []}
+        run.external = ExternalSearchResult(enabled=True, notes=[], results=[])
+        low_assessment = MaterialAssessment(
+            score=MATERIAL_READY_SCORE - 1,
+            level="不足",
+            reasons=["仍需补充"],
+            needs_external_search=True,
+            project_score=50,
+            prior_art_score=0,
+            dimensions=[],
+            capped_by=[],
+        )
+
+        with patch("app._assess_materials", return_value=low_assessment), patch(
+            "app.search_external_materials",
+            return_value=ExternalSearchResult(
+                enabled=True,
+                notes=["搜索服务未返回结果"],
+                results=[],
+            ),
+        ):
+            run.advance()
+
+        self.assertIn("连续", run.error or "")
+        self.assertEqual(MAX_SEARCH_NO_PROGRESS_ROUNDS, run.search_no_progress_rounds)
+        self.assertEqual("searched", run.phase)
 
 
 if __name__ == "__main__":

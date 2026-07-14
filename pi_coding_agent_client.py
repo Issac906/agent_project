@@ -11,6 +11,8 @@ import subprocess
 import time
 from typing import Any
 
+from runtime_paths import bundled_pi_invocation
+
 
 class PiCodingAgentError(RuntimeError):
     """Raised when Pi coding agent cannot complete a generation request."""
@@ -35,7 +37,7 @@ def generate_text_with_pi_coding_agent(
 ) -> str | PiCodingAgentResult:
     """Run Pi coding agent non-interactively and return text output."""
     project_root = project_root.resolve()
-    cmd = [_resolve_pi_command(pi_command), "--print", "--mode", "text"]
+    cmd = [*_resolve_pi_invocation(pi_command), "--print", "--mode", "text"]
 
     if provider:
         cmd.extend(["--provider", provider])
@@ -80,10 +82,15 @@ def generate_text_with_pi_coding_agent(
     return PiCodingAgentResult(text=text, usage=usage, session_file=session_file)
 
 
-def _resolve_pi_command(pi_command: str) -> str:
-    if "/" in pi_command:
-        return pi_command
-    return shutil.which(pi_command, path=_subprocess_env().get("PATH")) or pi_command
+def _resolve_pi_invocation(pi_command: str) -> list[str]:
+    command = str(pi_command or "pi").strip() or "pi"
+    if command.lower() in {"pi", "pi.cmd", "pi.exe"}:
+        bundled = bundled_pi_invocation()
+        if bundled:
+            return [str(bundled[0]), str(bundled[1])]
+    if "/" in command or "\\" in command:
+        return [command]
+    return [shutil.which(command, path=_subprocess_env().get("PATH")) or command]
 
 
 def _subprocess_env() -> dict[str, str]:

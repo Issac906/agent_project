@@ -52,7 +52,7 @@ class ExternalSearchTests(unittest.TestCase):
         self.assertEqual(1, len(results))
         self.assertIn("专利", results[0]["title"])
 
-    def test_configured_searchers_prioritize_anysearch(self) -> None:
+    def test_configured_searchers_prioritize_generic_search_api(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -64,7 +64,7 @@ class ExternalSearchTests(unittest.TestCase):
         ):
             providers = [name for name, _ in _configured_searchers()]
 
-        self.assertEqual("AnySearch", providers[0])
+        self.assertEqual("SearchAPI", providers[0])
         self.assertIn("GooglePatents", providers)
         self.assertIn("Bing", providers)
 
@@ -82,7 +82,7 @@ class ExternalSearchTests(unittest.TestCase):
         results = _parse_anysearch_results(payload, max_results=5)
 
         self.assertEqual(1, len(results))
-        self.assertEqual("AnySearch", results[0]["source"])
+        self.assertEqual("SearchAPI", results[0]["source"])
         self.assertIn("阳极效应", results[0]["title"])
 
 

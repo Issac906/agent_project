@@ -30,11 +30,36 @@ python3 -m PyInstaller \
   --add-data "skills:skills" \
   --hidden-import webview \
   --hidden-import webview.platforms.cocoa \
+  --hidden-import patent_agent_mcp \
+  --hidden-import patent_agent_cli \
+  --hidden-import patent_agent_bridge \
+  --hidden-import backend_runtime \
   desktop_launcher.py
+
+python3 -m PyInstaller \
+  --noconfirm \
+  --console \
+  --onedir \
+  --name "${APP_NAME}MCP" \
+  --add-data "templates:templates" \
+  --add-data "static:static" \
+  --add-data "skills:skills" \
+  --hidden-import patent_agent_mcp \
+  --hidden-import patent_agent_cli \
+  --hidden-import patent_agent_bridge \
+  --hidden-import backend_runtime \
+  desktop_launcher.py
+
+DMG_ROOT="dist/dmg-root"
+rm -rf "${DMG_ROOT}"
+mkdir -p "${DMG_ROOT}"
+cp -R "dist/${APP_NAME}.app" "${DMG_ROOT}/"
+cp -R "dist/${APP_NAME}MCP" "${DMG_ROOT}/"
+cp "AI_CLIENT_INTEGRATION.md" "${DMG_ROOT}/"
 
 hdiutil create \
   -volname "${APP_NAME}" \
-  -srcfolder "dist/${APP_NAME}.app" \
+  -srcfolder "${DMG_ROOT}" \
   -ov \
   -format UDZO \
   "dist/${DMG_NAME}"

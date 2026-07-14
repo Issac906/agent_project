@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-import os
-import threading
-import time
+import sys
 import webbrowser
 
-from app import app, find_available_port
-
-
-def _run_flask(host: str, port: int) -> None:
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+from backend_runtime import run_backend_forever, start_backend_process
 
 
 def _open_native_window(url: str) -> None:
@@ -33,15 +27,22 @@ def _open_native_window(url: str) -> None:
 
 
 def main() -> None:
-    host = os.getenv("WEB_HOST", "127.0.0.1")
-    preferred_port = int(os.getenv("WEB_PORT", "5000"))
-    port = find_available_port(host=host, preferred=preferred_port)
-    url = f"http://{host}:{port}"
+    args = sys.argv[1:]
+    if args and args[0] == "--backend":
+        run_backend_forever()
+        return
+    if args and args[0] == "--mcp":
+        from patent_agent_mcp import main as mcp_main
 
-    server = threading.Thread(target=_run_flask, args=(host, port), daemon=True)
-    server.start()
-    time.sleep(0.8)
-    _open_native_window(url)
+        mcp_main()
+        return
+    if args and args[0] == "--cli":
+        from patent_agent_cli import main as cli_main
+
+        raise SystemExit(cli_main(args[1:]))
+
+    endpoint = start_backend_process()
+    _open_native_window(endpoint.url)
 
 
 if __name__ == "__main__":

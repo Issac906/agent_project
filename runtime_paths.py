@@ -41,3 +41,19 @@ def data_path(*parts: str) -> Path:
     path = data_root().joinpath(*parts)
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def bundled_pi_invocation() -> tuple[Path, Path] | None:
+    if not is_packaged() or os.name != "nt":
+        return None
+    executable_dir = Path(sys.executable).resolve().parent
+    runtime_roots = [
+        executable_dir / "pi-runtime",
+        executable_dir.parent / "pi-runtime",
+    ]
+    for runtime_root in runtime_roots:
+        node = runtime_root / "node.exe"
+        cli = runtime_root / "node_modules" / "@earendil-works" / "pi-coding-agent" / "dist" / "cli.js"
+        if node.is_file() and cli.is_file():
+            return node, cli
+    return None

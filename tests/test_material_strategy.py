@@ -45,7 +45,7 @@ class MaterialStrategyTests(unittest.TestCase):
         self.assertGreaterEqual(len(strategy["layers"]), 5)
         self.assertEqual(1, len(strategy["candidate_paths"]))
         self.assertTrue(strategy["candidate_paths"][0]["source_layers"])
-        self.assertIn("不把外部已有方案作为创新来源", strategy["candidate_paths"][0]["idea_rationale"])
+        self.assertIn("不作为核心创新来源", strategy["candidate_paths"][0]["idea_rationale"])
 
 
 if __name__ == "__main__":

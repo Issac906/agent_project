@@ -61,6 +61,7 @@ HISTORY_DIR = OUTPUT_DIR / "history"
 HISTORY_INDEX = HISTORY_DIR / "index.json"
 MAX_HISTORY_ITEMS = 10
 MATERIAL_READY_SCORE = 80
+MAX_SEARCH_NO_PROGRESS_ROUNDS = 3
 
 load_dotenv()
 app = Flask(
@@ -70,6 +71,18 @@ app = Flask(
 )
 RUNS: dict[str, "WebPatentRun"] = {}
 RUNS_LOCK = Lock()
+
+
+@app.get("/api/integration/health")
+def api_integration_health() -> Any:
+    return jsonify(
+        {
+            "ok": True,
+            "service": "patent-agent",
+            "pid": os.getpid(),
+            "active_runs": len(RUNS),
+        }
+    )
 
 
 @app.errorhandler(ValueError)
@@ -148,6 +161,7 @@ class WebPatentRun:
         self.search_topic = ""
         self.base_search_topic = ""
         self.search_round = 0
+        self.search_no_progress_rounds = 0
         self.external: ExternalSearchResult | None = None
         self.material_strategy: dict[str, Any] | None = None
         self.compact_patent_memory: list[dict[str, str]] = []
@@ -200,7 +214,7 @@ class WebPatentRun:
             self.waiting_for = None
             self.phase = "searched"
             self.add_event("恢复自动检索", "已取消旧版素材暂停状态，继续自动补充检索。")
-        if self.waiting_for or self.phase == "done":
+        if self.error or self.waiting_for or self.phase == "done":
             return
 
         try:
@@ -245,6 +259,7 @@ class WebPatentRun:
                     max_results=6,
                 )
                 self.search_round = 1
+                self.search_no_progress_rounds = 0 if self.external.results else 1
                 self.phase = "searched"
                 self.add_event(
                     "外部检索",
@@ -279,6 +294,10 @@ class WebPatentRun:
                         supplement,
                     )
                     added_count = max(0, len(self.external.results) - before_count)
+                    if added_count:
+                        self.search_no_progress_rounds = 0
+                    else:
+                        self.search_no_progress_rounds += 1
                     self.search_topic = topic
                     self.add_event(
                         "自动补充检索",
@@ -296,6 +315,22 @@ class WebPatentRun:
                             "total_results": len(self.external.results),
                         },
                     )
+                    if self.search_no_progress_rounds >= MAX_SEARCH_NO_PROGRESS_ROUNDS:
+                        self.error = (
+                            f"外部搜索连续 {self.search_no_progress_rounds} 轮未返回新结果。"
+                            "请检查外部搜索 API 的地址、密钥和网络后重试本次检索。"
+                        )
+                        self.add_event("外部检索异常", self.error)
+                        self.add_interaction(
+                            "error",
+                            "外部检索异常",
+                            {
+                                "message": self.error,
+                                "round": self.search_round,
+                                "topic": topic,
+                                "notes": supplement.notes,
+                            },
+                        )
                     return
                 self.phase = "reassessed"
                 return
@@ -515,6 +550,14 @@ class WebPatentRun:
         self.phase = "reassessed"
         self.add_event("素材已达标", f"{self.assessment.score}/100，已达到候选生成门槛。")
 
+    def retry_external_search(self) -> None:
+        if self.phase != "searched":
+            raise ValueError("当前运行不在外部检索阶段。")
+        self.error = None
+        self.search_no_progress_rounds = 0
+        self.add_event("重试外部检索", "已重新读取运行时配置并继续自动补充检索。")
+        self.advance()
+
     def snapshot(self) -> dict[str, Any]:
         rows = _flatten_documents(self.active_documents or self.documents or {})
         all_rows = _flatten_documents(self.documents or {})
@@ -565,6 +608,7 @@ class WebPatentRun:
             "assessment": self._assessment_json(self.assessment),
             "search_topic": self.search_topic,
             "search_round": self.search_round,
+            "search_no_progress_rounds": self.search_no_progress_rounds,
             "external": {
                 "notes": self.external.notes if self.external else [],
                 "results": self.external.results if self.external else [],
@@ -1126,15 +1170,55 @@ def api_create_run() -> Any:
     return jsonify({"run_id": run.id, "url": f"/run/{run.id}"})
 
 
+@app.get("/api/runs")
+def api_list_runs() -> Any:
+    with RUNS_LOCK:
+        runs = list(RUNS.values())
+    return jsonify(
+        {
+            "runs": [
+                {
+                    "run_id": run.id,
+                    "created_at": run.created_at,
+                    "phase": run.phase,
+                    "waiting_for": run.waiting_for,
+                    "done": run.phase == "done",
+                    "error": run.error,
+                    "knowledge_base": run.selected_knowledge_base,
+                    "innovation_level": run.innovation_level,
+                    "candidate_count": len(run.candidates),
+                }
+                for run in reversed(runs)
+            ]
+        }
+    )
+
+
 @app.get("/api/runs/<run_id>")
 def api_get_run(run_id: str) -> Any:
     return jsonify(get_run(run_id).snapshot())
+
+
+@app.delete("/api/runs/<run_id>")
+def api_delete_run(run_id: str) -> Any:
+    with RUNS_LOCK:
+        removed = RUNS.pop(run_id, None)
+    if removed is None:
+        abort(404)
+    return jsonify({"ok": True, "run_id": run_id})
 
 
 @app.post("/api/runs/<run_id>/advance")
 def api_advance(run_id: str) -> Any:
     run = get_run(run_id)
     run.advance()
+    return jsonify(run.snapshot())
+
+
+@app.post("/api/runs/<run_id>/retry-search")
+def api_retry_search(run_id: str) -> Any:
+    run = get_run(run_id)
+    run.retry_external_search()
     return jsonify(run.snapshot())
 
 
@@ -1188,6 +1272,18 @@ def api_settings() -> Any:
     skills = load_agent_skills(resource_root())
     config = load_config()
     config_view = user_config_view()
+    from patent_agent_bridge import TOOLS as integration_tools
+
+    tool_rows = [tool.to_dict() for tool in registered_tools()]
+    tool_rows.extend(
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "category": "Desktop AI integration",
+            "owner": "patent_agent_bridge",
+        }
+        for tool in integration_tools
+    )
     return jsonify(
         {
             "agent_core": config.agent_core,
@@ -1205,7 +1301,7 @@ def api_settings() -> Any:
                 }
                 for skill in skills
             ],
-            "tools": [tool.to_dict() for tool in registered_tools()],
+            "tools": tool_rows,
         }
     )
 
