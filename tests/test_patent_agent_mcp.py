@@ -1,4 +1,5 @@
 import json
+from io import StringIO
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from patent_agent_bridge import (
     _list_history,
 )
 from patent_agent_mcp import _handle
+from patent_agent_cli import main as cli_main
 
 
 class PatentAgentBridgeTests(unittest.TestCase):
@@ -96,6 +98,17 @@ class PatentAgentBridgeTests(unittest.TestCase):
         payload = write.call_args.args[0]
         self.assertEqual(payload["id"], 2)
         names = {item["name"] for item in payload["result"]["tools"]}
+        self.assertIn("patent_start_run", names)
+
+    def test_cli_tools_output_is_single_line_ascii_json(self) -> None:
+        stdout = StringIO()
+        with patch("sys.stdout", stdout):
+            result = cli_main(["tools"])
+        output = stdout.getvalue()
+        self.assertEqual(0, result)
+        self.assertTrue(output.isascii())
+        self.assertEqual(1, len(output.splitlines()))
+        names = {item["name"] for item in json.loads(output)["tools"]}
         self.assertIn("patent_start_run", names)
 
 

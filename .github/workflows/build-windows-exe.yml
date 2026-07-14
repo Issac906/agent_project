@@ -85,11 +85,44 @@ jobs:
       - name: Verify AI integration executable
         shell: pwsh
         run: |
-          $ToolJson = & release\PatentAgent\PatentAgentMCP\PatentAgentMCP.exe --cli tools
-          if ($LASTEXITCODE -ne 0) {
-            throw "PatentAgentMCP CLI failed with exit code $LASTEXITCODE."
+          $ErrorActionPreference = "Stop"
+          $McpExe = (Resolve-Path ".\release\PatentAgent\PatentAgentMCP\PatentAgentMCP.exe").Path
+          $VerifyDir = Join-Path $env:RUNNER_TEMP "patent-agent-verification"
+          New-Item -ItemType Directory -Force $VerifyDir | Out-Null
+          $StdoutPath = Join-Path $VerifyDir "mcp-tools.stdout.json"
+          $StderrPath = Join-Path $VerifyDir "mcp-tools.stderr.txt"
+
+          $Process = Start-Process `
+            -FilePath $McpExe `
+            -ArgumentList @("--cli", "tools") `
+            -Wait `
+            -PassThru `
+            -NoNewWindow `
+            -RedirectStandardOutput $StdoutPath `
+            -RedirectStandardError $StderrPath
+
+          $StderrText = if (Test-Path $StderrPath) {
+            Get-Content $StderrPath -Raw -ErrorAction SilentlyContinue
+          } else { "" }
+          if ($StderrText) {
+            Write-Host "PatentAgentMCP stderr:"
+            Write-Host $StderrText
           }
-          $ToolData = $ToolJson | ConvertFrom-Json
+          if ($Process.ExitCode -ne 0) {
+            throw "PatentAgentMCP CLI failed with exit code $($Process.ExitCode). See stderr above."
+          }
+
+          $ToolJson = Get-Content $StdoutPath -Raw
+          if ([string]::IsNullOrWhiteSpace($ToolJson)) {
+            throw "PatentAgentMCP CLI returned empty stdout."
+          }
+          try {
+            $ToolData = $ToolJson | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            Write-Host "PatentAgentMCP stdout:"
+            Write-Host $ToolJson
+            throw "PatentAgentMCP CLI returned invalid JSON: $($_.Exception.Message)"
+          }
           $ToolNames = @($ToolData.tools | ForEach-Object { $_.name })
           foreach ($Required in @("patent_start_run", "patent_list_active_runs", "patent_select_idea", "patent_accept_section", "patent_list_history")) {
             if ($Required -notin $ToolNames) {
@@ -103,7 +136,16 @@ jobs:
           }
           Write-Host "Verified bundled Node.js: $NodeVersion"
 
+      - name: Upload verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PatentAgent-Windows-verification-${{ github.run_number }}
+          path: ${{ runner.temp }}/patent-agent-verification
+          if-no-files-found: ignore
+
       - name: Upload Windows portable package
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: PatentAgent-Windows-${{ github.run_number }}

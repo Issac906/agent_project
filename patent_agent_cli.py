@@ -22,7 +22,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "tools":
-        print(json_text({"tools": [tool.mcp_definition() for tool in TOOLS]}))
+        # Keep machine-readable discovery output on one ASCII-only line. This
+        # avoids Windows console encoding and line-by-line PowerShell parsing
+        # differences when the packaged executable is verified in CI.
+        print(
+            json.dumps(
+                {"tools": [tool.mcp_definition() for tool in TOOLS]},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        )
         return 0
     try:
         arguments = json.loads(args.arguments)
@@ -37,4 +46,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
