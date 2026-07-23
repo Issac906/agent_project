@@ -21,6 +21,10 @@ class AppConfig:
     lightrag_top_k: str | None
     lightrag_include_chunk_content: bool
 
+    kb_manager_url: str | None
+    kb_manager_api_key: str | None
+    kb_manager_timeout: int
+
     llm_provider: str
     llm_api_key: str | None
     llm_base_url: str | None
@@ -51,6 +55,9 @@ def load_config() -> AppConfig:
         lightrag_query_mode=_value("LIGHTRAG_QUERY_MODE", "mix", user_values),
         lightrag_top_k=_optional("LIGHTRAG_TOP_K", user_values),
         lightrag_include_chunk_content=_bool("LIGHTRAG_INCLUDE_CHUNK_CONTENT", True, user_values),
+        kb_manager_url=_optional("KB_MANAGER_URL", user_values),
+        kb_manager_api_key=_optional("KB_MANAGER_API_KEY", user_values),
+        kb_manager_timeout=_int("KB_MANAGER_TIMEOUT", 240, user_values),
         llm_provider=_value("LLM_PROVIDER", "none", user_values),
         llm_api_key=_optional("LLM_API_KEY", user_values),
         llm_base_url=_optional("LLM_BASE_URL", user_values),
@@ -161,6 +168,9 @@ def _apply_config_to_environment(config: AppConfig) -> None:
         "LIGHTRAG_QUERY_MODE": config.lightrag_query_mode,
         "LIGHTRAG_TOP_K": config.lightrag_top_k,
         "LIGHTRAG_INCLUDE_CHUNK_CONTENT": "true" if config.lightrag_include_chunk_content else "false",
+        "KB_MANAGER_URL": config.kb_manager_url,
+        "KB_MANAGER_API_KEY": config.kb_manager_api_key,
+        "KB_MANAGER_TIMEOUT": str(config.kb_manager_timeout),
         "SEARCH_PROVIDER": config.search_provider,
         "SEARCH_API_KEY": config.search_api_key,
         "AGENT_CORE": config.agent_core,

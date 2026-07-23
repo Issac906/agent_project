@@ -1,16 +1,48 @@
+# Local secrets and machine-specific configuration.
 .env
+.env.*
+!.env.example
+!*.env.example
+deploy/kb-manager.env
+
+# Python environments, caches, and coverage output.
 .venv/
+venv/
+myenv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
+# OS and editor metadata.
 .DS_Store
+.idea/
+
+# Packaging caches and distributable binaries.
 *.spec
 .pyinstaller-cache/
 build/
 dist/
+release/
+vendor/*.whl
 *.dmg
+*.pkg
 *.exe
+*.msi
+*.tar
+*.tar.gz
+*.zip
 
-outputs/*.md
-!outputs/.gitkeep
+# Generated documents and runtime state.
 outputs/
+results/
+feishu/
+.patent_agent/
+logs/
+*.log
+
+# Runtime-managed knowledge-base assignments.
+knowledge_base_catalog.json

@@ -1,0 +1,12 @@
+ARG LIGHTRAG_BASE_IMAGE=lightrag-demo:local
+FROM ${LIGHTRAG_BASE_IMAGE}
+
+COPY deploy/lightrag-webui-tab-bootstrap.js /tmp/lightrag-webui-tab-bootstrap.js
+COPY scripts/patch_lightrag_webui_tab.py /tmp/patch_lightrag_webui_tab.py
+
+RUN python3 /tmp/patch_lightrag_webui_tab.py \
+      /usr/local/lib/python3.11/site-packages/lightrag/api/webui \
+      /tmp/lightrag-webui-tab-bootstrap.js \
+    && rm -f \
+      /tmp/lightrag-webui-tab-bootstrap.js \
+      /tmp/patch_lightrag_webui_tab.py

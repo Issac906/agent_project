@@ -8,6 +8,11 @@ __pycache__/
 .venv/
 venv/
 myenv/
+build/
+dist/
+release/
+.pyinstaller-cache/
+*.spec
 .env
 .env.*
 !.env.example
@@ -16,3 +21,9 @@ outputs/
 *.tar.gz
 node_modules/
 .pytest_cache/
+tests/
+.github/
+design-system/
+feishu/
+PACKAGING.md
+AI_CLIENT_INTEGRATION.md

@@ -5,10 +5,30 @@ from patent_discovery_agent import (
     MaterialAssessment,
     PatentCandidate,
     _ensure_candidate_count,
+    _parse_candidates,
 )
 
 
 class CandidateGenerationTests(unittest.TestCase):
+    def test_candidate_without_name_is_preserved_with_derived_title(self) -> None:
+        raw = """候选1
+名称：工业设备状态预测方法
+核心方案：预测设备状态。
+创新点：融合多源状态变量。
+
+候选2
+核心方案：评估数字孪生模型的一致性。
+创新点：提出数字孪生的六维一致性评估体系，将拓扑、状态和行为统一校验。
+新技术特征：六维一致性指标。
+"""
+
+        candidates = _parse_candidates(raw)
+
+        self.assertEqual(2, len(candidates))
+        self.assertEqual("工业设备状态预测方法", candidates[0].title)
+        self.assertEqual("数字孪生六维一致性评估方法", candidates[1].title)
+        self.assertIn("名称：数字孪生六维一致性评估方法", candidates[1].raw)
+
     def test_single_llm_candidate_is_padded_to_five(self) -> None:
         candidates = _ensure_candidate_count(
             candidates=[

@@ -4,7 +4,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     WEB_HOST=0.0.0.0 \
     WEB_PORT=5000 \
-    PI_CODING_COMMAND=pi
+    PI_CODING_COMMAND=pi \
+    PATENT_AGENT_DATA_DIR=/data \
+    PATENT_AGENT_USER_CONFIG=/data/user_config.json \
+    TZ=Asia/Shanghai
 
 WORKDIR /app
 
@@ -30,6 +33,10 @@ COPY requirements.txt .
 RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt
 
 COPY . .
+
+RUN mkdir -p /data/outputs /data/feishu /app/outputs
+
+VOLUME ["/data", "/app/outputs"]
 
 EXPOSE 5000
 

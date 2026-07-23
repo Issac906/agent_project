@@ -1,9 +1,20 @@
-"""Build virtual content-specific knowledge bases from LightRAG documents."""
+"""Persist independently deployed LightRAG knowledge-base registrations."""
 
 from __future__ import annotations
 
+from datetime import datetime
+import json
 import re
+from threading import Lock
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+from runtime_paths import data_path
+
+
+CATALOG_PATH = data_path("knowledge_base_catalog.json")
+CATALOG_LOCK = Lock()
+UNASSIGNED_ID = "unassigned"
 
 
 TOPIC_PROFILES = [
@@ -90,36 +101,341 @@ def build_virtual_knowledge_bases(
     documents: list[dict[str, Any]],
     graph: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Classify current documents into virtual KBs and attach a graph to each group."""
+    """Return user-managed KBs and attach the matching graph subset to each one."""
     rows = [doc for doc in documents if isinstance(doc, dict)]
-    if not rows:
-        return []
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        if not catalog.get("initialized"):
+            catalog = _bootstrap_catalog(rows)
+            _save_catalog(catalog)
 
-    buckets: dict[str, dict[str, Any]] = {}
+    assignments = catalog.get("assignments") or {}
+    groups_by_id = {
+        str(item.get("id")): {
+            "id": str(item.get("id")),
+            "name": str(item.get("name") or "未命名知识库"),
+            "description": str(item.get("description") or "由用户管理的知识库。"),
+            "keywords": [],
+            "documents": [],
+            "user_managed": True,
+        }
+        for item in catalog.get("knowledge_bases", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    unassigned: list[dict[str, Any]] = []
     for row in rows:
-        profile = _best_profile(row)
-        if not profile:
-            profile = _fallback_profile(row)
-        bucket = buckets.setdefault(
-            profile["id"],
-            {
-                "id": profile["id"],
-                "name": profile["name"],
-                "description": profile["description"],
-                "keywords": profile.get("keywords", [])[:8],
-                "documents": [],
-            },
-        )
+        knowledge_base_id = _assigned_knowledge_base_id(row, assignments)
+        bucket = groups_by_id.get(knowledge_base_id)
+        if bucket is None:
+            unassigned.append(row)
+            continue
         bucket["documents"].append(row)
 
-    groups = list(buckets.values())
-    groups.sort(key=lambda item: (-len(item["documents"]), item["name"]))
+    groups = list(groups_by_id.values())
+    if unassigned:
+        groups.append(
+            {
+                "id": UNASSIGNED_ID,
+                "name": "待分类素材",
+                "description": "这些素材尚未由用户指定知识库，不会由 AI 自动分类。",
+                "keywords": [],
+                "documents": unassigned,
+                "user_managed": True,
+                "selectable": False,
+            }
+        )
+    groups.sort(key=lambda item: (item.get("id") == UNASSIGNED_ID, item["name"]))
     for group in groups:
         group["graph"] = _filter_graph_for_group(graph, group["documents"], group["name"])
         group["document_count"] = len(group["documents"])
         group["node_count"] = len(group["graph"].get("nodes", []))
         group["edge_count"] = len(group["graph"].get("edges", []))
+        group.setdefault("selectable", True)
     return groups
+
+
+def list_knowledge_base_catalog() -> list[dict[str, Any]]:
+    """List destinations available to the upload form."""
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+    return [
+        {
+            "id": str(item.get("id")),
+            "name": str(item.get("name") or "未命名知识库"),
+            "description": str(item.get("description") or ""),
+            "base_url": str(item.get("base_url") or ""),
+            "graph_url": graph_webui_url(str(item.get("base_url") or "")),
+            "isolation": "physical" if item.get("base_url") else "migration_required",
+            "selectable": bool(item.get("base_url")),
+            "manager_instance_id": str(item.get("manager_instance_id") or ""),
+            "managed": bool(item.get("manager_instance_id")),
+        }
+        for item in catalog.get("knowledge_bases", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+
+
+def create_knowledge_base(
+    name: str,
+    description: str = "",
+    base_url: str = "",
+    *,
+    manager_instance_id: str = "",
+) -> dict[str, Any]:
+    """Register a user-named physical LightRAG knowledge base instance."""
+    clean_name = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not clean_name:
+        raise ValueError("请输入新知识库名称。")
+    clean_base_url = normalize_instance_url(base_url)
+    if not clean_base_url:
+        raise ValueError("物理隔离知识库必须填写独立的 LightRAG API 地址。")
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        catalog["initialized"] = True
+        existing = {
+            str(item.get("name") or "").strip().casefold(): item
+            for item in catalog.get("knowledge_bases", [])
+            if isinstance(item, dict)
+        }
+        if clean_name.casefold() in existing:
+            raise ValueError("已存在同名知识库，请直接选择该知识库。")
+        if any(normalize_instance_url(str(row.get("base_url") or "")) == clean_base_url for row in catalog.get("knowledge_bases", []) if row.get("base_url")):
+            raise ValueError("该 LightRAG 实例已经绑定到另一个知识库。")
+        used_ids = {str(item.get("id")) for item in catalog.get("knowledge_bases", []) if isinstance(item, dict)}
+        base_id = _slug(clean_name) or "knowledge-base"
+        knowledge_base_id = base_id
+        suffix = 2
+        while knowledge_base_id in used_ids or knowledge_base_id in {"all", UNASSIGNED_ID}:
+            knowledge_base_id = f"{base_id}-{suffix}"
+            suffix += 1
+        item = {
+            "id": knowledge_base_id,
+            "name": clean_name,
+            "description": str(description or "").strip() or f"由用户创建的“{clean_name}”。",
+            "base_url": clean_base_url,
+            "manager_instance_id": str(manager_instance_id or "").strip(),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        catalog.setdefault("knowledge_bases", []).append(item)
+        _save_catalog(catalog)
+    return _public_catalog_item(item)
+
+
+def delete_knowledge_base_registration(knowledge_base_id: str) -> dict[str, Any]:
+    """Remove one isolated instance registration; the total KB is not stored here."""
+    clean_id = str(knowledge_base_id or "").strip()
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        item = next(
+            (
+                row
+                for row in catalog.get("knowledge_bases", [])
+                if isinstance(row, dict) and str(row.get("id")) == clean_id
+            ),
+            None,
+        )
+        if not item:
+            raise ValueError("知识库不存在。")
+        catalog["knowledge_bases"] = [
+            row for row in catalog.get("knowledge_bases", []) if str(row.get("id")) != clean_id
+        ]
+        _save_catalog(catalog)
+    return _public_catalog_item(item)
+
+
+def require_knowledge_base(knowledge_base_id: str, require_configured: bool = True) -> dict[str, Any]:
+    clean_id = str(knowledge_base_id or "").strip()
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+    item = next(
+        (
+            row
+            for row in catalog.get("knowledge_bases", [])
+            if isinstance(row, dict) and str(row.get("id")) == clean_id
+        ),
+        None,
+    )
+    if not item:
+        raise ValueError("请选择一个有效的已有知识库。")
+    result = _public_catalog_item(item)
+    if require_configured and not result["base_url"]:
+        raise ValueError("该知识库是旧版逻辑分组，尚未绑定独立 LightRAG 实例，不能用于物理隔离操作。")
+    return result
+
+
+def update_knowledge_base_instance(knowledge_base_id: str, base_url: str) -> dict[str, Any]:
+    """Bind a legacy catalog entry to a dedicated LightRAG server instance."""
+    clean_url = normalize_instance_url(base_url)
+    if not clean_url:
+        raise ValueError("请输入独立 LightRAG API 地址。")
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        item = next((row for row in catalog.get("knowledge_bases", []) if str(row.get("id")) == knowledge_base_id), None)
+        if not item:
+            raise ValueError("知识库不存在。")
+        if any(
+            str(row.get("id")) != knowledge_base_id
+            and row.get("base_url")
+            and normalize_instance_url(str(row.get("base_url"))) == clean_url
+            for row in catalog.get("knowledge_bases", [])
+        ):
+            raise ValueError("该 LightRAG 实例已经绑定到另一个知识库。")
+        item["base_url"] = clean_url
+        catalog["version"] = 2
+        _save_catalog(catalog)
+    return _public_catalog_item(item)
+
+
+def normalize_instance_url(base_url: str) -> str:
+    cleaned = str(base_url or "").strip()
+    if not cleaned:
+        return ""
+    parts = urlsplit(cleaned)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ValueError("LightRAG API 地址必须是完整的 http:// 或 https:// 地址。")
+    path = parts.path.rstrip("/")
+    if path.endswith("/webui"):
+        path = path[:-6]
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+
+
+def graph_webui_url(base_url: str) -> str:
+    clean = normalize_instance_url(base_url)
+    return f"{clean}/webui/?tab=knowledge-graph#/" if clean else ""
+
+
+def _public_catalog_item(item: dict[str, Any]) -> dict[str, Any]:
+    base_url = str(item.get("base_url") or "")
+    return {
+        "id": str(item.get("id") or ""),
+        "name": str(item.get("name") or item.get("id") or "未命名知识库"),
+        "description": str(item.get("description") or ""),
+        "base_url": base_url,
+        "graph_url": graph_webui_url(base_url),
+        "isolation": "physical" if base_url else "migration_required",
+        "selectable": bool(base_url),
+        "manager_instance_id": str(item.get("manager_instance_id") or ""),
+        "managed": bool(item.get("manager_instance_id")),
+    }
+
+
+def assign_document_to_knowledge_base(
+    knowledge_base_id: str,
+    *,
+    filename: str = "",
+    document_id: str = "",
+) -> None:
+    """Persist an explicit user assignment using stable document references."""
+    require_knowledge_base(knowledge_base_id)
+    references = _reference_candidates({"id": document_id, "file_path": filename, "filename": filename})
+    if not references:
+        raise ValueError("无法识别要分配的素材。")
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        assignments = catalog.setdefault("assignments", {})
+        for reference in references:
+            assignments[reference] = knowledge_base_id
+        _save_catalog(catalog)
+
+
+def remove_document_assignments(documents: list[dict[str, Any]]) -> None:
+    """Remove stale assignment keys after users delete documents."""
+    references = {ref for row in documents for ref in _reference_candidates(row)}
+    if not references:
+        return
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        assignments = catalog.setdefault("assignments", {})
+        changed = False
+        for reference in references:
+            if reference in assignments:
+                assignments.pop(reference, None)
+                changed = True
+        if changed:
+            _save_catalog(catalog)
+
+
+def clear_document_assignments() -> None:
+    """Clear assignments while keeping user-created knowledge base destinations."""
+    with CATALOG_LOCK:
+        catalog = _load_catalog()
+        catalog["initialized"] = True
+        catalog["assignments"] = {}
+        _save_catalog(catalog)
+
+
+def _load_catalog() -> dict[str, Any]:
+    try:
+        payload = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    return {
+        "version": int(payload.get("version") or 1),
+        "initialized": bool(payload.get("initialized")),
+        "knowledge_bases": payload.get("knowledge_bases") if isinstance(payload.get("knowledge_bases"), list) else [],
+        "assignments": payload.get("assignments") if isinstance(payload.get("assignments"), dict) else {},
+    }
+
+
+def _save_catalog(catalog: dict[str, Any]) -> None:
+    CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = CATALOG_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(CATALOG_PATH)
+
+
+def _bootstrap_catalog(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Preserve existing automatic groups once, then switch permanently to user control."""
+    buckets: dict[str, dict[str, Any]] = {}
+    assignments: dict[str, str] = {}
+    for row in rows:
+        profile = _best_profile(row) or _fallback_profile(row)
+        buckets.setdefault(
+            profile["id"],
+            {
+                "id": profile["id"],
+                "name": profile["name"],
+                "description": profile["description"],
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+        for reference in _reference_candidates(row):
+            assignments[reference] = profile["id"]
+    return {
+        "version": 1,
+        "initialized": True,
+        "knowledge_bases": sorted(buckets.values(), key=lambda item: item["name"]),
+        "assignments": assignments,
+    }
+
+
+def _assigned_knowledge_base_id(row: dict[str, Any], assignments: dict[str, Any]) -> str:
+    for reference in _reference_candidates(row):
+        value = str(assignments.get(reference) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _reference_candidates(row: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    document_id = str(row.get("id") or row.get("document_id") or row.get("doc_id") or "").strip()
+    file_path = str(row.get("file_path") or row.get("filename") or "").strip()
+    if document_id:
+        candidates.append(f"id:{document_id}")
+    if file_path:
+        normalized_path = file_path.replace("\\", "/").strip().casefold()
+        candidates.append(f"path:{normalized_path}")
+        candidates.append(f"name:{normalized_path.rsplit('/', 1)[-1]}")
+    return list(dict.fromkeys(candidates))
+
+
+def _slug(value: str) -> str:
+    ascii_slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    if ascii_slug:
+        return ascii_slug[:48]
+    chinese_slug = re.sub(r"[^\u4e00-\u9fa5]+", "-", value).strip("-")
+    return f"kb-{abs(hash(chinese_slug)) % 10**10}" if chinese_slug else ""
 
 
 def _best_profile(row: dict[str, Any]) -> dict[str, Any] | None:

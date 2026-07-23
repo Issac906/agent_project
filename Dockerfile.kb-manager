@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /service
+COPY requirements-kb-manager.txt .
+RUN python -m pip install --no-cache-dir -r requirements-kb-manager.txt
+COPY kb_manager_service.py .
+
+EXPOSE 9700
+CMD ["python", "kb_manager_service.py"]

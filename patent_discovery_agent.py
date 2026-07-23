@@ -795,12 +795,12 @@ def _generate_candidates(
     print("\n[候选专利方向]\n")
     print(raw)
     candidates = _parse_candidates(raw)
+    candidates = _ensure_candidate_count(candidates, material_text, external, assessment, raw, target=5)
     if len(candidates) < 5:
         raise RuntimeError(
-            f"候选 idea 解析不足：期望 5 个，实际 {len(candidates)} 个。"
-            "请检查 Pi Agent 输出是否严格包含“候选1”到“候选5”和“名称：”字段。"
+            f"候选 idea 自动补全失败：期望 5 个，实际 {len(candidates)} 个。"
         )
-    return _ensure_candidate_count(candidates, material_text, external, assessment, raw, target=5)
+    return candidates
 
 
 def _format_graph_fusion_for_prompt(graph_fusion: dict[str, Any] | None) -> str:
@@ -847,14 +847,42 @@ def _parse_candidates(raw: str) -> list[PatentCandidate]:
     chunks = re.split(r"(?=候选\s*\d+)", raw)
     candidates: list[PatentCandidate] = []
     for chunk in chunks:
-        if "名称" not in chunk:
+        heading = re.search(r"候选\s*(\d+)", chunk)
+        if not heading:
             continue
         normalized = re.sub(r"\*\*([^*]+)\*\*", r"\1", chunk)
         match = re.search(r"名称\s*[:：]\s*(.+)", normalized)
-        title = _clean_candidate_title(match.group(1)) if match else ""
+        title = _clean_candidate_title(match.group(1)) if match else _derive_candidate_title(normalized, heading.group(1))
         if title:
+            if not match:
+                normalized = re.sub(
+                    r"(候选\s*\d+\s*)",
+                    rf"\1\n名称：{title}\n",
+                    normalized,
+                    count=1,
+                )
             candidates.append(PatentCandidate(title=title, summary=normalized[:500], raw=normalized.strip()))
     return candidates
+
+
+def _derive_candidate_title(candidate_text: str, candidate_number: str) -> str:
+    """Recover a usable title when the model omitted only the name field."""
+    for field_name in ("创新点", "新技术特征", "核心方案"):
+        match = re.search(
+            rf"{field_name}\s*[:：]\s*(.+?)(?=\n\s*(?:核心方案|创新点|避让现有技术|未复用已有技术特征|新技术特征|技术效果来源|重合风险|人工确认点|素材充分性)\s*[:：]|\Z)",
+            candidate_text,
+            flags=re.S,
+        )
+        if not match:
+            continue
+        value = re.sub(r"\s+", "", match.group(1)).strip(" 。；;，,")
+        value = re.split(r"[。；;，,]", value, maxsplit=1)[0]
+        value = re.sub(r"^(?:本候选方案?|本方案|提出|构建|建立|设计|形成|采用)", "", value)
+        value = re.sub(r"^(?:一种)", "", value).strip(" ：:")
+        value = value.replace("的六维一致性评估体系", "六维一致性评估方法")
+        if 4 <= len(value) <= 30:
+            return _clean_candidate_title(value)
+    return f"候选方向{candidate_number}"
 
 
 def _ensure_candidate_count(

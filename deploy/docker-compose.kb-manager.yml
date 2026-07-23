@@ -1,0 +1,18 @@
+services:
+  knowledge-base-manager:
+    build:
+      context: ..
+      dockerfile: Dockerfile.kb-manager
+    image: patent-kb-manager:latest
+    container_name: patent-kb-manager
+    restart: unless-stopped
+    env_file:
+      - ${KB_MANAGER_ENV_FILE:-kb-manager.env}
+    ports:
+      - "${KB_MANAGER_BIND_PORT:-9700}:${KB_MANAGER_BIND_PORT:-9700}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The host and container path must be identical because this service asks
+      # the host Docker daemon to bind-mount child LightRAG data directories.
+      - ${KB_MANAGER_DATA_ROOT:-/root/KHJ/lightrag-kbs}:${KB_MANAGER_DATA_ROOT:-/root/KHJ/lightrag-kbs}
+      - ${KB_MANAGER_LIGHTRAG_ENV_FILE:-/root/KHJ/lightrag-manager/lightrag.env}:${KB_MANAGER_LIGHTRAG_ENV_FILE:-/root/KHJ/lightrag-manager/lightrag.env}:ro

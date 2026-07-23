@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import socket
 from threading import Lock
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 from typing import Any
 
@@ -18,6 +19,7 @@ from flask import Flask, abort, jsonify, render_template, request, send_from_dir
 from werkzeug.exceptions import HTTPException
 
 from agent_skill_loader import format_skills_for_prompt, load_agent_skills
+from backend_runtime import runtime_identity
 from config import AppConfig, load_config
 from citation_report import append_citation_section, build_citation_snapshot
 from docx_exporter import export_markdown_to_docx
@@ -25,7 +27,14 @@ from external_search import ExternalSearchResult, search_external_materials
 from formula_utils import normalize_formula_markdown
 from lightrag_client import LightRAGClient, LightRAGClientError
 from knowledge_graph import build_knowledge_graph, format_knowledge_graph_for_prompt
-from knowledge_base_groups import build_virtual_knowledge_bases
+from knowledge_base_groups import (
+    create_knowledge_base,
+    delete_knowledge_base_registration,
+    list_knowledge_base_catalog,
+    require_knowledge_base,
+    update_knowledge_base_instance,
+)
+from kb_manager_client import KnowledgeBaseManagerClient, KnowledgeBaseManagerError
 from material_strategy import build_material_strategy, innovation_index_for_level, innovation_level_label, normalize_innovation_level
 from patent_memory import (
     append_patent_memory,
@@ -71,6 +80,8 @@ app = Flask(
 )
 RUNS: dict[str, "WebPatentRun"] = {}
 RUNS_LOCK = Lock()
+_FEISHU_MANAGER: Any = None
+_FEISHU_MANAGER_LOCK = Lock()
 
 
 @app.get("/api/integration/health")
@@ -81,6 +92,7 @@ def api_integration_health() -> Any:
             "service": "patent-agent",
             "pid": os.getpid(),
             "active_runs": len(RUNS),
+            "runtime_id": runtime_identity(),
         }
     )
 
@@ -92,6 +104,11 @@ def handle_value_error(exc: ValueError) -> Any:
 
 @app.errorhandler(LightRAGClientError)
 def handle_lightrag_error(exc: LightRAGClientError) -> Any:
+    return jsonify({"error": str(exc)}), 502
+
+
+@app.errorhandler(KnowledgeBaseManagerError)
+def handle_kb_manager_error(exc: KnowledgeBaseManagerError) -> Any:
     return jsonify({"error": str(exc)}), 502
 
 
@@ -115,13 +132,105 @@ def disable_dynamic_cache(response: Any) -> Any:
     return response
 
 
-def make_client(config: AppConfig) -> LightRAGClient:
+def make_client(config: AppConfig, base_url: str | None = None) -> LightRAGClient:
     return LightRAGClient(
-        base_url=config.lightrag_base_url,
+        base_url=base_url or config.lightrag_base_url,
         api_key=config.lightrag_api_key,
         query_mode=config.lightrag_query_mode,
         include_chunk_content=config.lightrag_include_chunk_content,
     )
+
+
+def make_kb_manager(config: AppConfig) -> KnowledgeBaseManagerClient | None:
+    if not config.kb_manager_url or not config.kb_manager_api_key:
+        return None
+    return KnowledgeBaseManagerClient(
+        base_url=config.kb_manager_url,
+        api_key=config.kb_manager_api_key,
+        timeout=config.kb_manager_timeout,
+    )
+
+
+def kb_manager_status(config: AppConfig) -> dict[str, Any]:
+    manager = make_kb_manager(config)
+    if manager is None:
+        return {"configured": False, "available": False, "message": "未配置自动知识库管理服务。"}
+    try:
+        health = manager.health()
+        return {
+            "configured": True,
+            "available": bool(health.get("ok")),
+            "message": "自动实例管理可用。" if health.get("ok") else "管理服务暂不可用。",
+        }
+    except KnowledgeBaseManagerError as exc:
+        return {"configured": True, "available": False, "message": str(exc)}
+
+
+def client_for_knowledge_base(config: AppConfig, knowledge_base_id: str) -> LightRAGClient:
+    if str(knowledge_base_id or "all") == "all":
+        return make_client(config)
+    item = require_knowledge_base(knowledge_base_id)
+    if LightRAGClient._normalize_base_url(item["base_url"]) == LightRAGClient._normalize_base_url(config.lightrag_base_url):
+        raise ValueError("独立知识库不能与总知识库使用同一个 LightRAG API 地址。")
+    return make_client(config, item["base_url"])
+
+
+def load_isolated_knowledge_bases(config: AppConfig) -> list[dict[str, Any]]:
+    """Read every registered LightRAG instance independently."""
+    groups: list[dict[str, Any]] = []
+    total_url = LightRAGClient._normalize_base_url(config.lightrag_base_url)
+    for item in list_knowledge_base_catalog():
+        row = dict(item)
+        row.update({"documents": [], "document_count": 0, "node_count": 0, "edge_count": 0, "graph": None})
+        if not item.get("base_url"):
+            row["status_message"] = "旧版逻辑分组，需绑定独立 LightRAG 实例后迁移素材。"
+            groups.append(row)
+            continue
+        if LightRAGClient._normalize_base_url(item["base_url"]) == total_url:
+            row["selectable"] = False
+            row["isolation"] = "invalid_shared_instance"
+            row["status_message"] = "该地址与总知识库相同，不构成物理隔离。"
+            groups.append(row)
+            continue
+        try:
+            client = make_client(config, item["base_url"])
+            documents = _load_documents(client)
+            rows = _flatten_documents(documents)
+            graph = build_knowledge_graph(client, documents)
+            row["documents"] = [_document_json(value) for value in rows]
+            row["document_count"] = len(rows)
+            row["graph"] = graph
+            row["node_count"] = len((graph or {}).get("nodes", []))
+            row["edge_count"] = len((graph or {}).get("edges", []))
+            row["counts"] = documents.get("_counts", {})
+            row["selectable"] = True
+            row["isolation"] = "physical"
+        except (LightRAGClientError, ValueError) as exc:
+            row["selectable"] = False
+            row["status_message"] = str(exc)
+        groups.append(row)
+    return groups
+
+
+def _document_json(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "file_path": row.get("file_path", "未知"),
+        "id": _document_identifier(row),
+        "status": row.get("status", "未知"),
+        "chunks_count": row.get("chunks_count", 0),
+        "content_summary": row.get("content_summary", ""),
+    }
+
+
+def lightrag_graph_webui_url(base_url: str) -> str:
+    """Return the LightRAG WebUI graph tab URL for a server base URL."""
+
+    parts = urlsplit((base_url or "").strip())
+    path = parts.path.rstrip("/")
+    if not path.endswith("/webui"):
+        path = f"{path}/webui" if path else "/webui"
+    query = "&".join(value for value in (parts.query, "tab=knowledge-graph") if value)
+    return urlunsplit((parts.scheme, parts.netloc, f"{path}/", query, "/"))
 
 
 class WebPatentRun:
@@ -130,6 +239,7 @@ class WebPatentRun:
         config: AppConfig,
         innovation_level: str = "medium",
         knowledge_base_id: str = "all",
+        channel: str = "web",
     ) -> None:
         self.id = uuid4().hex[:12]
         self.created_at = datetime.now().isoformat(timespec="seconds")
@@ -137,7 +247,8 @@ class WebPatentRun:
         self.innovation_level = normalize_innovation_level(innovation_level)
         self.innovation_index = innovation_index_for_level(self.innovation_level)
         self.knowledge_base_id = str(knowledge_base_id or "all")
-        self.client = make_client(config)
+        self.channel = str(channel or "web")
+        self.client = client_for_knowledge_base(config, self.knowledge_base_id)
         self.output_dir = OUTPUT_DIR
         self.skills = load_agent_skills(resource_root())
         self.skill_prompt = format_skills_for_prompt(self.skills)
@@ -205,7 +316,7 @@ class WebPatentRun:
 
     def _refresh_runtime_config(self) -> None:
         self.config = load_config()
-        self.client = make_client(self.config)
+        self.client = client_for_knowledge_base(self.config, self.knowledge_base_id)
 
     def advance(self) -> None:
         self._refresh_runtime_config()
@@ -221,7 +332,8 @@ class WebPatentRun:
             if self.phase == "created":
                 self.documents = _load_documents(self.client)
                 self.full_knowledge_graph = build_knowledge_graph(self.client, self.documents)
-                self.knowledge_bases = build_virtual_knowledge_bases(self._knowledge_documents_json(), self.full_knowledge_graph)
+                # A generation run connects only to the selected physical instance.
+                self.knowledge_bases = list_knowledge_base_catalog()
                 self._activate_knowledge_base_scope()
                 self.material_text = self._knowledge_graph_material_text()
                 self.phase = "documents_loaded"
@@ -530,7 +642,7 @@ class WebPatentRun:
             raise ValueError("未知素材处理操作。")
         self.documents = _load_documents(self.client)
         self.full_knowledge_graph = build_knowledge_graph(self.client, self.documents)
-        self.knowledge_bases = build_virtual_knowledge_bases(self._knowledge_documents_json(), self.full_knowledge_graph)
+        self.knowledge_bases = list_knowledge_base_catalog()
         self._activate_knowledge_base_scope()
         self.material_text = self._knowledge_graph_material_text()
         self.assessment = _assess_materials(self._active_documents(), self.external, knowledge_graph=self.knowledge_graph)
@@ -573,6 +685,7 @@ class WebPatentRun:
             "innovation_level": self.innovation_level,
             "innovation_level_label": innovation_level_label(self.innovation_level),
             "knowledge_base_id": self.knowledge_base_id,
+            "channel": self.channel,
             "selected_knowledge_base": self.selected_knowledge_base,
             "events": self.events,
             "interactions": self.interactions,
@@ -846,21 +959,28 @@ class WebPatentRun:
             "node_count": len(all_graph.get("nodes", [])),
             "edge_count": len(all_graph.get("edges", [])),
         }
-        options = [all_option, *self.knowledge_bases]
-        selected = next((item for item in options if str(item.get("id")) == self.knowledge_base_id), None)
-        if not selected:
+        if self.knowledge_base_id == "all":
             selected = all_option
-            self.knowledge_base_id = "all"
+        else:
+            registered = require_knowledge_base(self.knowledge_base_id)
+            selected = {
+                **registered,
+                "documents": all_documents,
+                "document_count": len(all_documents),
+                "graph": all_graph,
+                "node_count": len(all_graph.get("nodes", [])),
+                "edge_count": len(all_graph.get("edges", [])),
+            }
         self.selected_knowledge_base = {
             key: selected.get(key)
             for key in ("id", "name", "description", "document_count", "node_count", "edge_count")
         }
         graph = selected.get("graph")
         self.knowledge_graph = graph if isinstance(graph, dict) else all_graph
-        self.active_documents = _documents_from_items(
-            selected.get("documents") or all_documents,
-            (self.documents or {}).get("_counts", {}),
-        )
+        selected_documents = selected.get("documents")
+        if not isinstance(selected_documents, list):
+            selected_documents = all_documents
+        self.active_documents = _documents_from_items(selected_documents, (self.documents or {}).get("_counts", {}))
 
     def _selected_knowledge_base_name(self) -> str:
         return str((self.selected_knowledge_base or {}).get("name") or "总知识库")
@@ -994,6 +1114,29 @@ def get_run(run_id: str) -> WebPatentRun:
     return run
 
 
+def get_feishu_manager() -> Any:
+    """Create the Feishu adapter lazily to avoid import cycles during startup."""
+
+    global _FEISHU_MANAGER
+    if _FEISHU_MANAGER is not None:
+        return _FEISHU_MANAGER
+    with _FEISHU_MANAGER_LOCK:
+        if _FEISHU_MANAGER is None:
+            from feishu_agent import FeishuPatentAgent
+            from feishu_integration import FeishuIntegrationManager, FeishuStateStore
+
+            store = FeishuStateStore()
+            agent = FeishuPatentAgent(store)
+            manager = FeishuIntegrationManager(agent.handle, agent.start_scheduled)
+            manager.store = store
+            _FEISHU_MANAGER = manager
+    return _FEISHU_MANAGER
+
+
+def start_background_services() -> None:
+    get_feishu_manager().start()
+
+
 @app.route("/")
 def index() -> str:
     return render_template("index.html")
@@ -1053,8 +1196,11 @@ def api_knowledge() -> Any:
         {
             "counts": documents.get("_counts", {}),
             "graph": graph,
-            "knowledge_bases": build_virtual_knowledge_bases(document_items, graph),
+            "knowledge_bases": load_isolated_knowledge_bases(config),
+            "knowledge_base_catalog": list_knowledge_base_catalog(),
             "documents": document_items,
+            "lightrag_graph_url": lightrag_graph_webui_url(config.lightrag_base_url),
+            "kb_manager": kb_manager_status(config),
         }
     )
 
@@ -1066,8 +1212,43 @@ def api_upload_knowledge() -> Any:
     if not upload or not upload.filename:
         raise ValueError("请选择要上传的文件。")
 
+    target_mode = str(request.form.get("knowledge_base_mode") or "").strip()
     config = load_config()
-    client = make_client(config)
+    provisioned: dict[str, Any] | None = None
+    if target_mode == "new":
+        name = str(request.form.get("new_knowledge_base_name") or "").strip()
+        description = str(request.form.get("new_knowledge_base_description") or "").strip()
+        requested_base_url = str(request.form.get("new_knowledge_base_base_url") or "")
+        manager = make_kb_manager(config)
+        if manager is not None:
+            provisioned = manager.create_knowledge_base(name, description)
+            requested_base_url = str(provisioned.get("base_url") or "")
+            if not requested_base_url:
+                raise KnowledgeBaseManagerError("管理服务未返回 LightRAG API 地址。")
+        elif not requested_base_url.strip():
+            raise ValueError("自动知识库管理服务尚未配置，请由管理员填写独立 LightRAG API 地址。")
+        if LightRAGClient._normalize_base_url(requested_base_url) == LightRAGClient._normalize_base_url(config.lightrag_base_url):
+            raise ValueError("新知识库不能复用总知识库地址。")
+        try:
+            target = create_knowledge_base(
+                name,
+                description,
+                requested_base_url,
+                manager_instance_id=str((provisioned or {}).get("id") or ""),
+            )
+        except Exception:
+            if provisioned and manager is not None and provisioned.get("id"):
+                try:
+                    manager.delete_knowledge_base(str(provisioned["id"]))
+                except KnowledgeBaseManagerError:
+                    pass
+            raise
+    elif target_mode == "existing":
+        target = require_knowledge_base(str(request.form.get("knowledge_base_id") or ""))
+    else:
+        raise ValueError("请选择存入已有知识库，或新建一个知识库。")
+
+    client = client_for_knowledge_base(config, target["id"])
     upload_result = client.upload_document(upload.stream, upload.filename)
     scan_result: Any | None = None
     scan_error: str | None = None
@@ -1093,20 +1274,60 @@ def api_upload_knowledge() -> Any:
         {
             "ok": True,
             "filename": upload.filename,
+            "knowledge_base": target,
+            "provisioned": provisioned,
             "upload_result": upload_result,
             "scan_result": scan_result,
             "scan_error": scan_error,
             "graph": graph,
-            "knowledge_bases": build_virtual_knowledge_bases(document_items, graph),
+            "knowledge_bases": load_isolated_knowledge_bases(config),
+            "knowledge_base_catalog": list_knowledge_base_catalog(),
         }
     )
+
+
+@app.patch("/api/knowledge/bases/<knowledge_base_id>")
+def api_bind_knowledge_base_instance(knowledge_base_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    config = load_config()
+    requested_base_url = str(payload.get("base_url") or "")
+    if LightRAGClient._normalize_base_url(requested_base_url) == LightRAGClient._normalize_base_url(config.lightrag_base_url):
+        raise ValueError("该地址是总知识库地址，请为物理隔离知识库部署另一个 LightRAG workspace/实例。")
+    item = update_knowledge_base_instance(knowledge_base_id, requested_base_url)
+    client = client_for_knowledge_base(config, knowledge_base_id)
+    client.get_status_counts()
+    return jsonify({"ok": True, "knowledge_base": item})
+
+
+@app.get("/api/knowledge/manager/status")
+def api_knowledge_manager_status() -> Any:
+    return jsonify(kb_manager_status(load_config()))
+
+
+@app.delete("/api/knowledge/bases/<knowledge_base_id>")
+def api_delete_managed_knowledge_base(knowledge_base_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    item = require_knowledge_base(knowledge_base_id)
+    if str(payload.get("confirm_name") or "").strip() != item["name"]:
+        raise ValueError("请输入完整知识库名称确认删除。")
+    manager_instance_id = str(item.get("manager_instance_id") or "")
+    if not manager_instance_id:
+        raise ValueError("该知识库不是由应用自动创建的实例，请由服务器管理员处理。")
+    manager = make_kb_manager(load_config())
+    if manager is None:
+        raise ValueError("自动知识库管理服务未配置，无法删除实例。")
+    result = manager.delete_knowledge_base(manager_instance_id)
+    deleted = delete_knowledge_base_registration(knowledge_base_id)
+    return jsonify({"ok": True, "knowledge_base": deleted, "manager_result": result})
 
 
 @app.delete("/api/knowledge")
 @register_tool("clear_knowledge_base", "清空 LightRAG 当前知识库文档。", "Knowledge management")
 def api_clear_knowledge() -> Any:
     config = load_config()
-    client = make_client(config)
+    payload = request.get_json(silent=True) or {}
+    knowledge_base_id = str(payload.get("knowledge_base_id") or "all")
+    client = client_for_knowledge_base(config, knowledge_base_id)
     result = client.clear_documents()
     documents = _load_documents(client)
     graph = build_knowledge_graph(client, documents)
@@ -1121,7 +1342,15 @@ def api_clear_knowledge() -> Any:
         }
         for row in rows
     ]
-    return jsonify({"ok": True, "result": result, "graph": graph, "knowledge_bases": build_virtual_knowledge_bases(document_items, graph)})
+    return jsonify(
+        {
+            "ok": True,
+            "result": result,
+            "graph": graph,
+            "knowledge_bases": load_isolated_knowledge_bases(config),
+            "knowledge_base_catalog": list_knowledge_base_catalog(),
+        }
+    )
 
 
 @app.delete("/api/knowledge/documents")
@@ -1136,7 +1365,11 @@ def api_delete_knowledge_documents() -> Any:
         raise ValueError("请选择至少一个要删除的文档。")
 
     config = load_config()
-    client = make_client(config)
+    knowledge_base_id = str(payload.get("knowledge_base_id") or "all")
+    client = client_for_knowledge_base(config, knowledge_base_id)
+    documents_before_delete = _load_documents(client)
+    rows_before_delete = _flatten_documents(documents_before_delete)
+    deleted_documents = [row for row in rows_before_delete if _document_identifier(row) in clean_ids]
     result = client.delete_documents(
         clean_ids,
         delete_file=bool(payload.get("delete_file", True)),
@@ -1155,7 +1388,16 @@ def api_delete_knowledge_documents() -> Any:
         }
         for row in rows
     ]
-    return jsonify({"ok": True, "deleted": clean_ids, "result": result, "graph": graph, "knowledge_bases": build_virtual_knowledge_bases(document_items, graph)})
+    return jsonify(
+        {
+            "ok": True,
+            "deleted": clean_ids,
+            "result": result,
+            "graph": graph,
+            "knowledge_bases": load_isolated_knowledge_bases(config),
+            "knowledge_base_catalog": list_knowledge_base_catalog(),
+        }
+    )
 
 
 @app.post("/api/runs")
@@ -1164,7 +1406,23 @@ def api_create_run() -> Any:
     innovation_level = normalize_innovation_level(payload.get("innovation_level", payload.get("innovation_index", "medium")))
     knowledge_base_id = str(payload.get("knowledge_base_id") or "all").strip() or "all"
     config = load_config()
-    run = WebPatentRun(config, innovation_level=innovation_level, knowledge_base_id=knowledge_base_id)
+    channel = str(payload.get("channel") or "web").strip() or "web"
+    run = WebPatentRun(
+        config,
+        innovation_level=innovation_level,
+        knowledge_base_id=knowledge_base_id,
+        channel=channel,
+    )
+    if channel == "feishu":
+        run.add_interaction(
+            "channel",
+            "通过飞书开始生成",
+            {
+                "channel": channel,
+                "knowledge_base_id": knowledge_base_id,
+                "innovation_level": innovation_level,
+            },
+        )
     with RUNS_LOCK:
         RUNS[run.id] = run
     return jsonify({"run_id": run.id, "url": f"/run/{run.id}"})
@@ -1274,6 +1532,7 @@ def api_settings() -> Any:
     config_view = user_config_view()
     from patent_agent_bridge import TOOLS as integration_tools
 
+    feishu_manager = get_feishu_manager()
     tool_rows = [tool.to_dict() for tool in registered_tools()]
     tool_rows.extend(
         {
@@ -1302,6 +1561,10 @@ def api_settings() -> Any:
                 for skill in skills
             ],
             "tools": tool_rows,
+            "feishu": {
+                "status": feishu_manager.status(),
+                "schedules": feishu_manager.schedules(),
+            },
         }
     )
 
@@ -1313,6 +1576,7 @@ def api_save_runtime_settings() -> Any:
         raise ValueError("配置内容必须是 JSON 对象。")
     config_view = save_user_config(payload)
     config = load_config()
+    get_feishu_manager().refresh()
     return jsonify(
         {
             "ok": True,
@@ -1325,6 +1589,42 @@ def api_save_runtime_settings() -> Any:
             },
         }
     )
+
+
+@app.get("/api/feishu/status")
+def api_feishu_status() -> Any:
+    manager = get_feishu_manager()
+    return jsonify({"status": manager.status(), "schedules": manager.schedules()})
+
+
+@app.post("/api/feishu/schedules")
+def api_feishu_create_schedule() -> Any:
+    payload = request.get_json(silent=True) or {}
+    return jsonify({"ok": True, "schedule": get_feishu_manager().save_schedule(payload)})
+
+
+@app.put("/api/feishu/schedules/<schedule_id>")
+def api_feishu_update_schedule(schedule_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    return jsonify({"ok": True, "schedule": get_feishu_manager().save_schedule(payload, schedule_id)})
+
+
+@app.delete("/api/feishu/schedules/<schedule_id>")
+def api_feishu_delete_schedule(schedule_id: str) -> Any:
+    if not get_feishu_manager().delete_schedule(schedule_id):
+        abort(404)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/feishu/test")
+def api_feishu_test() -> Any:
+    payload = request.get_json(silent=True) or {}
+    get_feishu_manager().send_test(
+        str(payload.get("target_type") or "group"),
+        str(payload.get("target_id") or "").strip(),
+        str(payload.get("text") or "飞书机器人连接测试成功。"),
+    )
+    return jsonify({"ok": True})
 
 
 def _internal_llm_label(config: AppConfig) -> str:
@@ -1437,6 +1737,7 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
     record = {
         "id": record_id,
         "run_id": run.id,
+        "channel": run.channel,
         "detail_url": f"/history/{record_id}",
         "created_at": run.created_at,
         "completed_at": completed_at,
@@ -1503,6 +1804,7 @@ def save_history_record(run: WebPatentRun) -> dict[str, Any]:
         for key in (
             "id",
             "run_id",
+            "channel",
             "created_at",
             "completed_at",
             "title",
@@ -1579,4 +1881,5 @@ if __name__ == "__main__":
     port = find_available_port(host=host, preferred=preferred_port)
     if port != preferred_port:
         print(f"Port {preferred_port} is busy, using http://{host}:{port}")
+    start_background_services()
     app.run(host=host, port=port, debug=False)

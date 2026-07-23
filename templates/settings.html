@@ -19,15 +19,31 @@
         </div>
       </header>
 
-      <section class="summary-grid">
-        <div class="metric"><span>Agent 核</span><strong id="agentCore">-</strong></div>
-        <div class="metric"><span>内部 LLM</span><strong id="internalLlm">-</strong></div>
-        <div class="metric"><span>Skills</span><strong id="skillCount">-</strong></div>
-        <div class="metric"><span>Tools</span><strong id="toolCount">-</strong></div>
-      </section>
+      <div class="settings-layout">
+        <aside class="settings-sidebar" aria-label="系统设置导航">
+          <p class="settings-sidebar-title">设置目录</p>
+          <nav>
+            <a href="#preferences" class="active">应用偏好</a>
+            <a href="#runtime">运行配置</a>
+            <a href="#feishu">飞书机器人</a>
+            <a href="#skills">Skills</a>
+            <a href="#tools">Tools</a>
+          </nav>
+          <div class="settings-sidebar-note">
+            <span>自动发现</span>
+            <p>新增 Skill 或 Tool 后，刷新配置即可在对应区域查看。</p>
+          </div>
+        </aside>
 
-      <div class="settings-grid">
-        <section class="panel settings-preferences">
+        <div class="settings-content">
+          <section class="summary-grid settings-summary" aria-label="运行概览">
+            <div class="metric"><span>Agent 核</span><strong id="agentCore">-</strong></div>
+            <div class="metric"><span>内部 LLM</span><strong id="internalLlm">-</strong></div>
+            <div class="metric"><span>Skills</span><strong id="skillCount">-</strong></div>
+            <div class="metric"><span>Tools</span><strong id="toolCount">-</strong></div>
+          </section>
+
+        <section class="settings-section settings-preferences" id="preferences">
           <div class="panel-head">
             <div>
               <h2>应用偏好</h2>
@@ -62,7 +78,7 @@
             <label class="preference-row">
               <span>
                 <strong>界面密度</strong>
-                <small>控制列表和卡片间距。</small>
+                <small>控制列表和表单间距。</small>
               </span>
               <select id="densitySetting">
                 <option value="comfortable">舒适</option>
@@ -80,14 +96,19 @@
           </div>
         </section>
 
-        <section class="panel settings-runtime">
+        <section class="settings-section settings-runtime" id="runtime">
           <div class="panel-head">
             <div>
               <h2>运行时 API 配置</h2>
               <p>这些配置保存在当前用户电脑中，不会写入项目 <code>.env</code>，也不会被打进安装包。</p>
             </div>
           </div>
-          <div class="runtime-config-grid">
+          <div class="settings-subsection">
+            <div class="settings-subsection-head">
+              <h3>外部搜索</h3>
+              <p>配置用于补充背景资料和现有技术检索的服务。</p>
+            </div>
+            <div class="runtime-config-grid">
             <label class="config-field">
               <span>外部搜索 Provider</span>
               <select id="cfgSearchProvider">
@@ -104,6 +125,14 @@
               <span>外部搜索 API 地址</span>
               <input id="cfgSearchBaseUrl" type="url" placeholder="https://.../api" />
             </label>
+            </div>
+          </div>
+          <div class="settings-subsection">
+            <div class="settings-subsection-head">
+              <h3>Agent 与模型</h3>
+              <p>指定专利工作流使用的 Agent 核、模型和认证信息。</p>
+            </div>
+            <div class="runtime-config-grid">
             <label class="config-field">
               <span>Agent 核</span>
               <select id="cfgAgentCore">
@@ -129,6 +158,24 @@
               <input id="cfgPiAgentApiKey" type="password" autocomplete="new-password" placeholder="留空则不修改已有 key" />
               <small id="cfgPiAgentApiKeyHint"></small>
             </label>
+            </div>
+          </div>
+          <div class="settings-subsection">
+            <div class="settings-subsection-head">
+              <h3>知识库实例管理</h3>
+              <p>由公司服务器上的管理服务自动创建物理隔离的 LightRAG 实例。普通用户无需填写端口。</p>
+            </div>
+            <div class="runtime-config-grid">
+              <label class="config-field">
+                <span>管理服务地址</span>
+                <input id="cfgKbManagerUrl" type="url" placeholder="例如：http://192.168.130.130:9700" />
+              </label>
+              <label class="config-field">
+                <span>管理服务令牌</span>
+                <input id="cfgKbManagerApiKey" type="password" autocomplete="new-password" placeholder="留空则不修改已有令牌" />
+                <small id="cfgKbManagerApiKeyHint"></small>
+              </label>
+            </div>
           </div>
           <div class="settings-actions">
             <button class="button primary" id="saveRuntimeConfigBtn">保存 API 配置</button>
@@ -137,7 +184,170 @@
           <p class="config-path">配置文件位置：<code id="runtimeConfigPath">-</code></p>
         </section>
 
-        <section class="panel">
+        <section class="settings-section settings-runtime feishu-settings" id="feishu">
+          <div class="panel-head">
+            <div>
+              <h2>飞书机器人</h2>
+              <p>通过飞书长连接接收消息。候选方案与每一章正文会完整发送，并等待用户接受、重写或提出修改意见。</p>
+            </div>
+            <span id="feishuConnectionBadge" class="integration-badge">未启用</span>
+          </div>
+          <div class="settings-subsection">
+            <div class="settings-subsection-head">
+              <h3>连接配置</h3>
+              <p>保存应用凭据并查看飞书长连接状态。</p>
+            </div>
+            <div class="runtime-config-grid">
+            <label class="config-field config-check-field">
+              <span>启用飞书机器人</span>
+              <input id="cfgFeishuEnabled" type="checkbox" />
+              <small>需先在飞书开放平台创建企业自建应用、添加机器人能力并启用长连接。</small>
+            </label>
+            <label class="config-field">
+              <span>App ID</span>
+              <input id="cfgFeishuAppId" type="text" autocomplete="off" placeholder="cli_..." />
+            </label>
+            <label class="config-field">
+              <span>App Secret</span>
+              <input id="cfgFeishuAppSecret" type="password" autocomplete="new-password" placeholder="留空则不修改已有 secret" />
+              <small id="cfgFeishuAppSecretHint"></small>
+            </label>
+            <label class="config-field">
+              <span>应用可访问地址</span>
+              <input id="cfgFeishuPublicBaseUrl" type="url" placeholder="例如 https://patent.company.com" />
+              <small>用于在飞书中打开历史记录和下载文件；仅本机使用时可留空。</small>
+            </label>
+            <label class="config-field">
+              <span>飞书 OpenAPI 地址</span>
+              <input id="cfgFeishuApiBaseUrl" type="url" placeholder="https://open.feishu.cn" />
+            </label>
+            </div>
+          </div>
+          <div class="settings-actions">
+            <button class="button primary" id="saveFeishuConfigBtn">保存并启用</button>
+            <span id="feishuConfigStatus" class="status-text"></span>
+          </div>
+
+          <div class="schedule-editor-wrap settings-subsection">
+            <div class="settings-subsection-head">
+              <h3>定时生成</h3>
+              <p>选择固定周期或一次性倒计时。到点后会自动启动专利生成并在飞书中等待用户选择。</p>
+            </div>
+            <fieldset class="schedule-type-switch" aria-label="计划类型">
+              <label>
+                <input type="radio" name="scheduleType" value="recurring" checked />
+                <span>固定周期</span>
+                <small>每天、每周或每月重复</small>
+              </label>
+              <label>
+                <input type="radio" name="scheduleType" value="once" />
+                <span>倒计时发送</span>
+                <small>几分钟或几小时后执行一次</small>
+              </label>
+            </fieldset>
+            <div class="runtime-config-grid schedule-grid">
+              <input id="scheduleId" type="hidden" />
+              <label class="config-field">
+                <span>计划名称</span>
+                <input id="scheduleName" type="text" value="定时专利生成" />
+              </label>
+              <label class="config-field config-check-field">
+                <span>启用该计划</span>
+                <input id="scheduleEnabled" type="checkbox" checked />
+              </label>
+              <div id="recurringScheduleFields" class="schedule-visual-fields">
+                <label class="config-field">
+                  <span>重复频率</span>
+                  <select id="scheduleRepeatType">
+                    <option value="daily">每天</option>
+                    <option value="weekly" selected>每周</option>
+                    <option value="monthly">每月</option>
+                  </select>
+                </label>
+                <div class="config-field" id="scheduleWeekdayField">
+                  <span>选择星期</span>
+                  <div class="weekday-picker" role="radiogroup" aria-label="每周发送日期">
+                    <button type="button" data-weekday="0" class="selected">周一</button>
+                    <button type="button" data-weekday="1">周二</button>
+                    <button type="button" data-weekday="2">周三</button>
+                    <button type="button" data-weekday="3">周四</button>
+                    <button type="button" data-weekday="4">周五</button>
+                    <button type="button" data-weekday="5">周六</button>
+                    <button type="button" data-weekday="6">周日</button>
+                  </div>
+                </div>
+                <div class="config-field hidden" id="scheduleMonthdayField">
+                  <span>选择日期</span>
+                  <div class="monthday-picker-wrap">
+                    <button type="button" class="date-picker-trigger" id="monthdayPickerButton" aria-expanded="false">
+                      每月 1 日
+                    </button>
+                    <div class="monthday-popover hidden" id="monthdayPopover" aria-label="选择每月日期"></div>
+                  </div>
+                </div>
+                <label class="config-field">
+                  <span>发送时间</span>
+                  <input id="scheduleSendTime" type="time" value="09:00" />
+                  <small>点击时间框使用系统时间选择器。</small>
+                </label>
+              </div>
+              <div id="delayScheduleFields" class="schedule-visual-fields hidden">
+                <div class="config-field">
+                  <span>多久后发送</span>
+                  <div class="delay-input-group">
+                    <input id="scheduleDelayValue" type="number" min="1" max="10080" step="1" value="5" />
+                    <select id="scheduleDelayUnit" aria-label="倒计时单位">
+                      <option value="minutes">分钟后</option>
+                      <option value="hours">小时后</option>
+                    </select>
+                  </div>
+                  <small id="scheduleDelayPreview">预计将在 5 分钟后执行一次。</small>
+                </div>
+              </div>
+              <input id="scheduleCron" type="hidden" value="0 9 * * 0" />
+              <label class="config-field">
+                <span>时区</span>
+                <input id="scheduleTimezone" type="text" value="Asia/Shanghai" />
+              </label>
+              <label class="config-field">
+                <span>接收目标</span>
+                <select id="scheduleTargetType">
+                  <option value="group">飞书群</option>
+                  <option value="user">指定用户</option>
+                </select>
+              </label>
+              <label class="config-field">
+                <span>群 Chat ID / 用户 Open ID</span>
+                <input id="scheduleTargetId" type="text" placeholder="在群里向机器人发送“查看会话ID”获得" />
+              </label>
+              <label class="config-field">
+                <span>默认知识库</span>
+                <select id="scheduleKnowledgeBase"><option value="all">全部知识库</option></select>
+              </label>
+              <label class="config-field">
+                <span>默认创新档位</span>
+                <select id="scheduleInnovationLevel">
+                  <option value="low">低</option>
+                  <option value="medium" selected>中</option>
+                  <option value="high">高</option>
+                </select>
+              </label>
+              <label class="config-field schedule-message-field">
+                <span>启动消息</span>
+                <textarea id="scheduleReminderText" rows="3">定时专利生成任务已经启动，请留意候选 idea。</textarea>
+              </label>
+            </div>
+            <div class="settings-actions">
+              <button class="button primary" id="saveScheduleBtn">保存计划</button>
+              <button class="button ghost" id="resetScheduleBtn">新建计划</button>
+              <button class="button ghost" id="testFeishuBtn">发送测试消息</button>
+              <span id="scheduleStatus" class="status-text"></span>
+            </div>
+            <div id="scheduleList" class="schedule-list"></div>
+          </div>
+        </section>
+
+        <section class="settings-section" id="skills">
           <div class="panel-head">
             <div>
               <h2>当前 Skills</h2>
@@ -147,7 +357,7 @@
           <div id="skillsList" class="registry-list"></div>
         </section>
 
-        <section class="panel">
+        <section class="settings-section" id="tools">
           <div class="panel-head">
             <div>
               <h2>当前 Tools</h2>
@@ -156,6 +366,7 @@
           </div>
           <div id="toolsList" class="registry-list"></div>
         </section>
+        </div>
       </div>
     </main>
 
@@ -163,6 +374,45 @@
       const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
       }[c]));
+
+      const settingsNavLinks = Array.from(document.querySelectorAll(".settings-sidebar nav a"));
+      const settingsSections = settingsNavLinks
+        .map((link) => document.querySelector(link.getAttribute("href")))
+        .filter(Boolean);
+
+      function setActiveSettingsSection(sectionId) {
+        settingsNavLinks.forEach((link) => {
+          const active = link.getAttribute("href") === `#${sectionId}`;
+          link.classList.toggle("active", active);
+          if (active) link.setAttribute("aria-current", "location");
+          else link.removeAttribute("aria-current");
+        });
+      }
+
+      let settingsScrollFrame = 0;
+      function syncSettingsNavigation() {
+        if (settingsScrollFrame) return;
+        settingsScrollFrame = window.requestAnimationFrame(() => {
+          settingsScrollFrame = 0;
+          const activationLine = Math.min(180, window.innerHeight * 0.28);
+          let activeSection = settingsSections[0];
+          settingsSections.forEach((section) => {
+            if (section.getBoundingClientRect().top <= activationLine) activeSection = section;
+          });
+          const atPageEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+          if (atPageEnd) activeSection = settingsSections[settingsSections.length - 1];
+          if (activeSection) setActiveSettingsSection(activeSection.id);
+        });
+      }
+
+      settingsNavLinks.forEach((link) => {
+        link.addEventListener("click", () => {
+          setActiveSettingsSection(link.getAttribute("href").slice(1));
+        });
+      });
+      window.addEventListener("scroll", syncSettingsNavigation, { passive: true });
+      window.addEventListener("resize", syncSettingsNavigation);
+      syncSettingsNavigation();
 
       async function loadSettings() {
         const response = await fetch("/api/settings");
@@ -172,6 +422,7 @@
         document.getElementById("skillCount").textContent = (data.skills || []).length;
         document.getElementById("toolCount").textContent = (data.tools || []).length;
         applyRuntimeConfig(data.user_config || {});
+        applyFeishuStatus(data.feishu || {});
         document.getElementById("skillsList").innerHTML = (data.skills || []).map((skill) => `
           <article class="registry-item">
             <div class="registry-head">
@@ -203,9 +454,16 @@
         document.getElementById("cfgPiCommand").value = values.PI_CODING_COMMAND || "pi";
         document.getElementById("cfgPiProvider").value = values.PI_CODING_PROVIDER || "";
         document.getElementById("cfgPiModel").value = values.PI_CODING_MODEL || "";
+        document.getElementById("cfgKbManagerUrl").value = values.KB_MANAGER_URL || "";
         document.getElementById("runtimeConfigPath").textContent = userConfig.path || "-";
         document.getElementById("cfgSearchApiKeyHint").textContent = secrets.SEARCH_API_KEY?.configured ? `已配置：${secrets.SEARCH_API_KEY.masked}` : "未配置";
         document.getElementById("cfgPiAgentApiKeyHint").textContent = secrets.PI_AGENT_API_KEY?.configured ? `已配置：${secrets.PI_AGENT_API_KEY.masked}` : "未配置";
+        document.getElementById("cfgKbManagerApiKeyHint").textContent = secrets.KB_MANAGER_API_KEY?.configured ? `已配置：${secrets.KB_MANAGER_API_KEY.masked}` : "未配置";
+        document.getElementById("cfgFeishuEnabled").checked = String(values.FEISHU_ENABLED || "false").toLowerCase() === "true";
+        document.getElementById("cfgFeishuAppId").value = values.FEISHU_APP_ID || "";
+        document.getElementById("cfgFeishuApiBaseUrl").value = values.FEISHU_API_BASE_URL || "https://open.feishu.cn";
+        document.getElementById("cfgFeishuPublicBaseUrl").value = values.FEISHU_PUBLIC_BASE_URL || "";
+        document.getElementById("cfgFeishuAppSecretHint").textContent = secrets.FEISHU_APP_SECRET?.configured ? `已配置：${secrets.FEISHU_APP_SECRET.masked}` : "未配置";
       }
 
       function readRuntimeConfigForm() {
@@ -215,12 +473,15 @@
           AGENT_CORE: document.getElementById("cfgAgentCore").value,
           PI_CODING_COMMAND: document.getElementById("cfgPiCommand").value,
           PI_CODING_PROVIDER: document.getElementById("cfgPiProvider").value,
-          PI_CODING_MODEL: document.getElementById("cfgPiModel").value
+          PI_CODING_MODEL: document.getElementById("cfgPiModel").value,
+          KB_MANAGER_URL: document.getElementById("cfgKbManagerUrl").value
         };
         const searchKey = document.getElementById("cfgSearchApiKey").value.trim();
         const piAgentKey = document.getElementById("cfgPiAgentApiKey").value.trim();
+        const kbManagerKey = document.getElementById("cfgKbManagerApiKey").value.trim();
         if (searchKey) payload.SEARCH_API_KEY = searchKey;
         if (piAgentKey) payload.PI_AGENT_API_KEY = piAgentKey;
+        if (kbManagerKey) payload.KB_MANAGER_API_KEY = kbManagerKey;
         return payload;
       }
 
@@ -239,6 +500,7 @@
           if (!response.ok) throw new Error(data.error || "保存失败");
           document.getElementById("cfgSearchApiKey").value = "";
           document.getElementById("cfgPiAgentApiKey").value = "";
+          document.getElementById("cfgKbManagerApiKey").value = "";
           applyRuntimeConfig(data.user_config || {});
           document.getElementById("agentCore").textContent = data.agent_core || "-";
           document.getElementById("internalLlm").textContent = data.internal_llm || "-";
@@ -247,6 +509,295 @@
           status.textContent = error.message || "保存失败";
         } finally {
           button.disabled = false;
+        }
+      }
+
+      function readFeishuConfigForm() {
+        const payload = {
+          FEISHU_ENABLED: document.getElementById("cfgFeishuEnabled").checked ? "true" : "false",
+          FEISHU_APP_ID: document.getElementById("cfgFeishuAppId").value.trim(),
+          FEISHU_API_BASE_URL: document.getElementById("cfgFeishuApiBaseUrl").value.trim(),
+          FEISHU_PUBLIC_BASE_URL: document.getElementById("cfgFeishuPublicBaseUrl").value.trim()
+        };
+        const secret = document.getElementById("cfgFeishuAppSecret").value.trim();
+        if (secret) payload.FEISHU_APP_SECRET = secret;
+        return payload;
+      }
+
+      async function saveFeishuConfig() {
+        const button = document.getElementById("saveFeishuConfigBtn");
+        const status = document.getElementById("feishuConfigStatus");
+        button.disabled = true;
+        status.textContent = "正在保存...";
+        try {
+          const response = await fetch("/api/settings/runtime", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(readFeishuConfigForm())
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "保存失败");
+          document.getElementById("cfgFeishuAppSecret").value = "";
+          applyRuntimeConfig(data.user_config || {});
+          status.textContent = "已保存。首次启用会立即连接；修改正在使用的凭据后请重启应用。";
+          await loadFeishuStatus();
+        } catch (error) {
+          status.textContent = error.message || "保存失败";
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      function applyFeishuStatus(data) {
+        const status = data.status || {};
+        const badge = document.getElementById("feishuConnectionBadge");
+        document.getElementById("cfgFeishuEnabled").checked = Boolean(status.enabled);
+        badge.textContent = status.stream_connected ? "长连接已启动" : (status.enabled ? "等待连接" : "未启用");
+        badge.dataset.active = status.stream_connected ? "true" : "false";
+        document.getElementById("feishuConfigStatus").textContent = status.last_error || "";
+        renderSchedules(data.schedules || []);
+      }
+
+      async function loadFeishuStatus() {
+        const response = await fetch("/api/feishu/status");
+        const data = await response.json();
+        if (response.ok) applyFeishuStatus(data);
+      }
+
+      let selectedMonthday = 1;
+
+      function selectedScheduleType() {
+        return document.querySelector('input[name="scheduleType"]:checked')?.value || "recurring";
+      }
+
+      function selectedWeekday() {
+        return Number(document.querySelector(".weekday-picker button.selected")?.dataset.weekday || 0);
+      }
+
+      function selectWeekday(value) {
+        document.querySelectorAll(".weekday-picker button").forEach((button) => {
+          const active = Number(button.dataset.weekday) === Number(value);
+          button.classList.toggle("selected", active);
+          button.setAttribute("aria-checked", active ? "true" : "false");
+        });
+      }
+
+      function selectMonthday(value) {
+        selectedMonthday = Math.min(31, Math.max(1, Number(value) || 1));
+        document.getElementById("monthdayPickerButton").textContent = `每月 ${selectedMonthday} 日`;
+        document.querySelectorAll("#monthdayPopover button").forEach((button) => {
+          button.classList.toggle("selected", Number(button.dataset.day) === selectedMonthday);
+        });
+      }
+
+      function renderMonthdayPicker() {
+        const popover = document.getElementById("monthdayPopover");
+        popover.innerHTML = Array.from({ length: 31 }, (_, index) => {
+          const day = index + 1;
+          return `<button type="button" data-day="${day}" aria-label="每月 ${day} 日">${day}</button>`;
+        }).join("");
+        popover.querySelectorAll("button").forEach((button) => {
+          button.addEventListener("click", () => {
+            selectMonthday(button.dataset.day);
+            popover.classList.add("hidden");
+            document.getElementById("monthdayPickerButton").setAttribute("aria-expanded", "false");
+          });
+        });
+        selectMonthday(selectedMonthday);
+      }
+
+      function updateDelayPreview() {
+        const input = document.getElementById("scheduleDelayValue");
+        const unit = document.getElementById("scheduleDelayUnit").value;
+        const maximum = unit === "hours" ? 168 : 10080;
+        input.max = String(maximum);
+        const amount = Math.min(maximum, Math.max(1, Number(input.value) || 1));
+        input.value = String(amount);
+        const milliseconds = unit === "hours" ? amount * 3600000 : amount * 60000;
+        const due = new Date(Date.now() + milliseconds);
+        const unitText = unit === "hours" ? "小时" : "分钟";
+        document.getElementById("scheduleDelayPreview").textContent =
+          `预计 ${due.toLocaleString("zh-CN", { hour12: false })} 执行一次（${amount} ${unitText}后）。`;
+      }
+
+      function syncScheduleControls() {
+        const isOnce = selectedScheduleType() === "once";
+        document.getElementById("recurringScheduleFields").classList.toggle("hidden", isOnce);
+        document.getElementById("delayScheduleFields").classList.toggle("hidden", !isOnce);
+        const repeatType = document.getElementById("scheduleRepeatType").value;
+        document.getElementById("scheduleWeekdayField").classList.toggle("hidden", repeatType !== "weekly");
+        document.getElementById("scheduleMonthdayField").classList.toggle("hidden", repeatType !== "monthly");
+        if (isOnce) updateDelayPreview();
+      }
+
+      function readScheduleForm() {
+        return {
+          id: document.getElementById("scheduleId").value || undefined,
+          name: document.getElementById("scheduleName").value.trim(),
+          enabled: document.getElementById("scheduleEnabled").checked,
+          schedule_type: selectedScheduleType(),
+          repeat_type: document.getElementById("scheduleRepeatType").value,
+          send_time: document.getElementById("scheduleSendTime").value,
+          weekday: selectedWeekday(),
+          monthday: selectedMonthday,
+          delay_value: Number(document.getElementById("scheduleDelayValue").value),
+          delay_unit: document.getElementById("scheduleDelayUnit").value,
+          timezone: document.getElementById("scheduleTimezone").value.trim(),
+          target_type: document.getElementById("scheduleTargetType").value,
+          target_id: document.getElementById("scheduleTargetId").value.trim(),
+          knowledge_base_id: document.getElementById("scheduleKnowledgeBase").value,
+          innovation_level: document.getElementById("scheduleInnovationLevel").value,
+          reminder_text: document.getElementById("scheduleReminderText").value.trim()
+        };
+      }
+
+      async function saveSchedule() {
+        const values = readScheduleForm();
+        const status = document.getElementById("scheduleStatus");
+        const url = values.id ? `/api/feishu/schedules/${encodeURIComponent(values.id)}` : "/api/feishu/schedules";
+        status.textContent = "正在保存计划...";
+        try {
+          const response = await fetch(url, {
+            method: values.id ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(values)
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "保存失败");
+          status.textContent = "计划已保存。";
+          resetScheduleForm();
+          await loadFeishuStatus();
+        } catch (error) {
+          status.textContent = error.message || "保存失败";
+        }
+      }
+
+      function editSchedule(id) {
+        const item = window.feishuSchedules.find((row) => row.id === id);
+        if (!item) return;
+        document.getElementById("scheduleId").value = item.id;
+        document.getElementById("scheduleName").value = item.name || "";
+        document.getElementById("scheduleEnabled").checked = Boolean(item.enabled);
+        const scheduleType = item.schedule_type || "recurring";
+        const typeRadio = document.querySelector(`input[name="scheduleType"][value="${scheduleType}"]`);
+        if (typeRadio) typeRadio.checked = true;
+        const legacy = parseLegacyCron(item.cron || "");
+        document.getElementById("scheduleRepeatType").value = item.repeat_type && item.repeat_type !== "custom" ? item.repeat_type : legacy.repeatType;
+        document.getElementById("scheduleSendTime").value = item.send_time || legacy.sendTime;
+        selectWeekday(item.weekday ?? legacy.weekday);
+        selectMonthday(item.monthday ?? legacy.monthday);
+        document.getElementById("scheduleDelayValue").value = item.delay_value || 5;
+        document.getElementById("scheduleDelayUnit").value = item.delay_unit || "minutes";
+        document.getElementById("scheduleTimezone").value = item.timezone || "Asia/Shanghai";
+        document.getElementById("scheduleTargetType").value = item.target_type || "group";
+        document.getElementById("scheduleTargetId").value = item.target_id || "";
+        document.getElementById("scheduleKnowledgeBase").value = item.knowledge_base_id || "all";
+        document.getElementById("scheduleInnovationLevel").value = item.innovation_level || "medium";
+        document.getElementById("scheduleReminderText").value = item.reminder_text || "";
+        document.getElementById("scheduleStatus").textContent = `正在编辑：${item.name}`;
+        syncScheduleControls();
+      }
+
+      function parseLegacyCron(cron) {
+        const parts = String(cron || "").trim().split(/\s+/);
+        if (parts.length !== 5) return { repeatType: "weekly", sendTime: "09:00", weekday: 0, monthday: 1 };
+        const [minute, hour, day, , weekday] = parts;
+        const sendTime = `${String(Number(hour) || 0).padStart(2, "0")}:${String(Number(minute) || 0).padStart(2, "0")}`;
+        if (day !== "*") return { repeatType: "monthly", sendTime, weekday: 0, monthday: Number(day) || 1 };
+        if (weekday !== "*") return { repeatType: "weekly", sendTime, weekday: Number(weekday) || 0, monthday: 1 };
+        return { repeatType: "daily", sendTime, weekday: 0, monthday: 1 };
+      }
+
+      async function deleteSchedule(id) {
+        if (!confirm("确定删除这条定时提醒吗？")) return;
+        const response = await fetch(`/api/feishu/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+        const data = await response.json();
+        if (!response.ok) {
+          document.getElementById("scheduleStatus").textContent = data.error || "删除失败";
+          return;
+        }
+        resetScheduleForm();
+        await loadFeishuStatus();
+      }
+
+      async function testFeishu() {
+        const values = readScheduleForm();
+        const status = document.getElementById("scheduleStatus");
+        status.textContent = "正在发送测试消息...";
+        try {
+          const response = await fetch("/api/feishu/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target_type: values.target_type, target_id: values.target_id })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "发送失败");
+          status.textContent = "测试消息已发送。";
+        } catch (error) {
+          status.textContent = error.message || "发送失败";
+        }
+      }
+
+      function resetScheduleForm() {
+        document.getElementById("scheduleId").value = "";
+        document.getElementById("scheduleName").value = "定时专利生成";
+        document.getElementById("scheduleEnabled").checked = true;
+        document.querySelector('input[name="scheduleType"][value="recurring"]').checked = true;
+        document.getElementById("scheduleRepeatType").value = "weekly";
+        document.getElementById("scheduleSendTime").value = "09:00";
+        selectWeekday(0);
+        selectMonthday(1);
+        document.getElementById("scheduleDelayValue").value = 5;
+        document.getElementById("scheduleDelayUnit").value = "minutes";
+        document.getElementById("scheduleTimezone").value = "Asia/Shanghai";
+        document.getElementById("scheduleTargetType").value = "group";
+        document.getElementById("scheduleTargetId").value = "";
+        document.getElementById("scheduleKnowledgeBase").value = "all";
+        document.getElementById("scheduleInnovationLevel").value = "medium";
+        document.getElementById("scheduleReminderText").value = "定时专利生成任务已经启动，请留意候选 idea。";
+        document.getElementById("scheduleStatus").textContent = "";
+        syncScheduleControls();
+      }
+
+      function scheduleDescription(item) {
+        if ((item.schedule_type || "recurring") === "once") {
+          if (item.completed_at) return `已执行 · ${new Date(item.completed_at).toLocaleString("zh-CN", { hour12: false })}`;
+          return item.next_run_time ? `执行一次 · ${new Date(item.next_run_time).toLocaleString("zh-CN", { hour12: false })}` : "一次性计划等待调度";
+        }
+        const labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+        if (item.repeat_type === "daily") return `每天 ${item.send_time || "09:00"}`;
+        if (item.repeat_type === "monthly") return `每月 ${item.monthday || 1} 日 ${item.send_time || "09:00"}`;
+        if (item.repeat_type === "weekly") return `每周${labels[item.weekday || 0]} ${item.send_time || "09:00"}`;
+        return `周期规则 ${item.cron || "-"}`;
+      }
+
+      function renderSchedules(rows) {
+        window.feishuSchedules = rows;
+        document.getElementById("scheduleList").innerHTML = rows.map((item) => `
+          <article class="schedule-item">
+            <div>
+              <strong>${escapeHtml(item.name)}</strong>
+              <p>${item.enabled ? "已启用" : (item.completed_at ? "已完成" : "已停用")} · ${escapeHtml(scheduleDescription(item))} · ${escapeHtml(item.timezone)}</p>
+              <small>目标：${escapeHtml(item.target_type)} / ${escapeHtml(item.target_id)}${item.next_run_time && item.schedule_type !== "once" ? ` · 下次：${escapeHtml(new Date(item.next_run_time).toLocaleString("zh-CN", { hour12: false }))}` : ""}</small>
+            </div>
+            <div class="schedule-item-actions">
+              <button class="button ghost" onclick="editSchedule('${escapeHtml(item.id)}')">编辑</button>
+              <button class="button ghost danger-text" onclick="deleteSchedule('${escapeHtml(item.id)}')">删除</button>
+            </div>
+          </article>
+        `).join("") || '<div class="empty">尚未创建定时提醒。</div>';
+      }
+
+      async function loadKnowledgeBaseOptions() {
+        try {
+          const response = await fetch("/api/knowledge");
+          const data = await response.json();
+          const select = document.getElementById("scheduleKnowledgeBase");
+          select.innerHTML = '<option value="all">全部知识库</option>' + (data.knowledge_bases || []).map((item) =>
+            `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.title || item.id)}</option>`
+          ).join("");
+        } catch {
+          // Keep the all-knowledge-base option when LightRAG is temporarily unavailable.
         }
       }
 
@@ -300,11 +851,36 @@
 
       document.getElementById("refreshSettingsBtn").addEventListener("click", loadSettings);
       document.getElementById("saveRuntimeConfigBtn").addEventListener("click", saveRuntimeConfig);
+      document.getElementById("saveFeishuConfigBtn").addEventListener("click", saveFeishuConfig);
+      document.getElementById("saveScheduleBtn").addEventListener("click", saveSchedule);
+      document.getElementById("resetScheduleBtn").addEventListener("click", resetScheduleForm);
+      document.getElementById("testFeishuBtn").addEventListener("click", testFeishu);
+      document.querySelectorAll('input[name="scheduleType"]').forEach((radio) => radio.addEventListener("change", syncScheduleControls));
+      document.getElementById("scheduleRepeatType").addEventListener("change", syncScheduleControls);
+      document.querySelectorAll(".weekday-picker button").forEach((button) => {
+        button.addEventListener("click", () => selectWeekday(button.dataset.weekday));
+      });
+      document.getElementById("monthdayPickerButton").addEventListener("click", () => {
+        const popover = document.getElementById("monthdayPopover");
+        const willOpen = popover.classList.contains("hidden");
+        popover.classList.toggle("hidden", !willOpen);
+        document.getElementById("monthdayPickerButton").setAttribute("aria-expanded", willOpen ? "true" : "false");
+      });
+      document.addEventListener("click", (event) => {
+        if (event.target.closest(".monthday-picker-wrap")) return;
+        document.getElementById("monthdayPopover").classList.add("hidden");
+        document.getElementById("monthdayPickerButton").setAttribute("aria-expanded", "false");
+      });
+      document.getElementById("scheduleDelayValue").addEventListener("input", updateDelayPreview);
+      document.getElementById("scheduleDelayUnit").addEventListener("change", updateDelayPreview);
+      renderMonthdayPicker();
+      syncScheduleControls();
       const preferences = readPreferences();
       applyPreferences(preferences);
       if (preferences.autoRefresh) {
         loadSettings();
       }
+      loadKnowledgeBaseOptions();
     </script>
   </body>
 </html>

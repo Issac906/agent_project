@@ -47,6 +47,11 @@ python -m PyInstaller `
   --hidden-import patent_agent_cli `
   --hidden-import patent_agent_bridge `
   --hidden-import backend_runtime `
+  --hidden-import feishu_integration `
+  --hidden-import feishu_rendering `
+  --hidden-import feishu_agent `
+  --collect-submodules lark_oapi `
+  --hidden-import apscheduler `
   desktop_launcher.py
 
 python -m PyInstaller `
@@ -62,6 +67,11 @@ python -m PyInstaller `
   --hidden-import patent_agent_cli `
   --hidden-import patent_agent_bridge `
   --hidden-import backend_runtime `
+  --hidden-import feishu_integration `
+  --hidden-import feishu_rendering `
+  --hidden-import feishu_agent `
+  --collect-submodules lark_oapi `
+  --hidden-import apscheduler `
   desktop_launcher.py
 
 Copy-Item "dist\${AppName}MCP" "dist\$AppName\${AppName}MCP" -Recurse -Force

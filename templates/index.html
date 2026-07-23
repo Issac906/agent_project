@@ -21,7 +21,7 @@
         </div>
       </header>
 
-      <section class="summary-grid">
+      <section class="summary-grid flat-summary" aria-label="知识库状态">
         <div class="metric">
           <span>已处理文档</span>
           <strong id="processedCount">-</strong>
@@ -36,7 +36,7 @@
         </div>
       </section>
 
-      <section class="panel compact-panel">
+      <section class="workspace-section compact-panel">
         <div class="panel-head">
           <div>
             <h2>生成偏好</h2>
@@ -60,7 +60,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="workspace-section knowledge-workspace">
         <div class="panel-head">
           <div>
             <h2>知识库素材</h2>
@@ -69,12 +69,46 @@
           <span class="status-pill" id="loadState">准备读取</span>
         </div>
         <div class="knowledge-tools">
-          <form id="uploadForm" class="upload-form">
-            <label class="file-picker">
-              <span>选择素材文件</span>
-              <input type="file" id="materialFile" name="file">
-            </label>
-            <button class="button primary" type="submit" id="uploadBtn">上传并扫描</button>
+          <form id="uploadForm" class="upload-form upload-workflow">
+            <div class="upload-file-row">
+              <label class="file-picker">
+                <span>选择素材文件</span>
+                <input type="file" id="materialFile" name="file">
+              </label>
+              <button class="button primary" type="submit" id="uploadBtn">上传并扫描</button>
+            </div>
+            <fieldset class="upload-destination">
+              <legend>素材存入位置</legend>
+              <div class="destination-mode" role="radiogroup" aria-label="知识库分配方式">
+                <label>
+                  <input type="radio" name="knowledgeBaseMode" value="existing" checked>
+                  <span>已有知识库</span>
+                </label>
+                <label>
+                  <input type="radio" name="knowledgeBaseMode" value="new">
+                  <span>新建知识库</span>
+                </label>
+              </div>
+              <label class="destination-field" id="existingKnowledgeBaseField">
+                <span>选择知识库</span>
+                <select id="uploadKnowledgeBaseId" aria-label="选择已有知识库"></select>
+              </label>
+              <div class="new-knowledge-base-fields hidden" id="newKnowledgeBaseFields">
+                <label class="destination-field">
+                  <span>知识库名称</span>
+                  <input id="newKnowledgeBaseName" type="text" maxlength="60" placeholder="例如：铝电解工艺知识库">
+                </label>
+                <label class="destination-field">
+                  <span>用途说明（选填）</span>
+                  <input id="newKnowledgeBaseDescription" type="text" maxlength="160" placeholder="说明该知识库包含的素材范围">
+                </label>
+                <label class="destination-field" id="manualKnowledgeBaseUrlField">
+                  <span>独立 LightRAG API 地址</span>
+                  <input id="newKnowledgeBaseBaseUrl" type="url" placeholder="例如：http://192.168.130.130:9622">
+                </label>
+              </div>
+              <p class="destination-note" id="kbProvisioningNote">正在检查自动知识库管理服务。</p>
+            </fieldset>
           </form>
           <div class="danger-actions">
             <button class="button danger" id="deleteSelectedBtn" type="button" disabled>删除选中素材</button>
@@ -83,7 +117,6 @@
         </div>
         <div id="toolMessage" class="tool-message hidden"></div>
         <div id="knowledgeBases" class="knowledge-bases"></div>
-        <div id="knowledgeGraph" class="knowledge-graph"></div>
         <div id="documents" class="doc-list"></div>
       </section>
     </main>
@@ -95,16 +128,13 @@
       const allCount = document.getElementById("allCount");
       const failedCount = document.getElementById("failedCount");
       const toolMessage = document.getElementById("toolMessage");
-      const knowledgeGraphEl = document.getElementById("knowledgeGraph");
       const knowledgeBasesEl = document.getElementById("knowledgeBases");
       const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
       const innovationValue = document.getElementById("innovationValue");
-      const graphMemory = {
-        positions: new Map(),
-        nodeIds: new Set(),
-      };
       let selectedKnowledgeBaseId = "all";
       let knowledgeScopeOptions = [];
+      let knowledgeBaseCatalog = [];
+      let kbManager = { configured: false, available: false };
 
       function showMessage(text, type = "info") {
         toolMessage.className = `tool-message ${type}`;
@@ -137,12 +167,32 @@
           allCount.textContent = counts.all ?? "-";
           failedCount.textContent = counts.failed ?? "-";
           loadState.textContent = "已连接";
-          renderKnowledgeBases(data.knowledge_bases || [], data.graph, data.documents || []);
-          if (!data.documents.length) {
+          kbManager = data.kb_manager || { configured: false, available: false };
+          updateProvisioningUi();
+          renderKnowledgeBases(
+            data.knowledge_bases || [],
+            data.graph,
+            data.documents || [],
+            data.lightrag_graph_url || ""
+          );
+          updateKnowledgeBaseCatalog(data.knowledge_base_catalog || data.knowledge_bases || []);
+          renderDocumentsForScope();
+          if (!(knowledgeScopeOptions.find((item) => item.id === selectedKnowledgeBaseId)?.documents || []).length) {
             documentsEl.innerHTML = '<div class="empty">暂无可用文档</div>';
             return;
           }
-          documentsEl.innerHTML = data.documents.map((doc) => `
+          bindDocumentCheckboxes();
+        } catch (err) {
+          loadState.textContent = "读取失败";
+          documentsEl.innerHTML = `<div class="empty danger">${err}</div>`;
+          knowledgeBasesEl.innerHTML = "";
+        }
+      }
+
+      function renderDocumentsForScope() {
+        const scope = knowledgeScopeOptions.find((item) => item.id === selectedKnowledgeBaseId);
+        const rows = scope?.documents || [];
+        documentsEl.innerHTML = rows.map((doc) => `
             <article class="doc-item">
               <label class="doc-select">
                 <input type="checkbox" class="doc-checkbox" value="${escapeHtml(doc.id || "")}" ${doc.id ? "" : "disabled"}>
@@ -158,17 +208,14 @@
                 <p>${escapeHtml(compact(doc.content_summary))}</p>
               </div>
             </article>
-          `).join("");
-          documentsEl.querySelectorAll(".doc-checkbox").forEach((checkbox) => {
+          `).join("") || '<div class="empty">当前知识库暂无可用文档</div>';
+      }
+
+      function bindDocumentCheckboxes() {
+        documentsEl.querySelectorAll(".doc-checkbox").forEach((checkbox) => {
             checkbox.addEventListener("change", updateDeleteButton);
-          });
-          updateDeleteButton();
-        } catch (err) {
-          loadState.textContent = "读取失败";
-          documentsEl.innerHTML = `<div class="empty danger">${err}</div>`;
-          knowledgeBasesEl.innerHTML = "";
-          knowledgeGraphEl.innerHTML = `<div class="empty danger">知识图谱读取失败：${escapeHtml(err)}</div>`;
-        }
+        });
+        updateDeleteButton();
       }
 
       function selectedDocIds() {
@@ -322,7 +369,7 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
         `;
       }
 
-      function renderKnowledgeBases(groups, fullGraph, documents) {
+      function renderKnowledgeBases(groups, fullGraph, documents, lightragGraphUrl) {
         knowledgeScopeOptions = [
           {
             id: "all",
@@ -333,16 +380,17 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
             edge_count: (fullGraph?.edges || []).length,
             documents,
             graph: fullGraph,
+            graph_url: lightragGraphUrl,
+            selectable: true,
+            isolation: "physical",
           },
           ...groups,
         ];
-        if (!knowledgeScopeOptions.some((item) => item.id === selectedKnowledgeBaseId)) {
+        if (!knowledgeScopeOptions.some((item) => item.id === selectedKnowledgeBaseId && item.selectable !== false)) {
           selectedKnowledgeBaseId = "all";
         }
-        const selected = knowledgeScopeOptions.find((item) => item.id === selectedKnowledgeBaseId) || knowledgeScopeOptions[0];
         if (!knowledgeScopeOptions.length) {
           knowledgeBasesEl.innerHTML = '<div class="empty">暂无可选知识图谱。</div>';
-          knowledgeGraphEl.innerHTML = '<div class="empty">暂无知识图谱</div>';
           return;
         }
         knowledgeBasesEl.innerHTML = `
@@ -355,29 +403,119 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
           </div>
           <div class="kb-group-grid">
             ${knowledgeScopeOptions.map((group) => `
-              <label class="kb-card kb-choice ${group.id === selectedKnowledgeBaseId ? "selected" : ""}">
-                <input type="radio" name="knowledgeBaseId" value="${escapeHtml(group.id)}" ${group.id === selectedKnowledgeBaseId ? "checked" : ""}>
-                <div class="registry-head">
-                  <strong>${escapeHtml(group.name || "未命名知识库")}</strong>
-                  <span>${group.document_count || 0} 文档</span>
+              <article class="kb-row kb-choice ${group.id === selectedKnowledgeBaseId ? "selected" : ""} ${group.selectable === false ? "disabled" : ""}">
+                <label class="kb-choice-body">
+                  <input type="radio" name="knowledgeBaseId" value="${escapeHtml(group.id)}" ${group.id === selectedKnowledgeBaseId ? "checked" : ""} ${group.selectable === false ? "disabled" : ""}>
+                  <div class="registry-head">
+                    <strong>${escapeHtml(group.name || "未命名知识库")}</strong>
+                    <span>${group.document_count || 0} 文档</span>
+                  </div>
+                  <p>${escapeHtml(group.description || "")}</p>
+                  <div class="kb-stats">
+                    <span>${group.node_count || 0} 节点</span>
+                    <span>${group.edge_count || 0} 关系</span>
+                  </div>
+                  <div class="material-source-list">
+                    ${(group.documents || []).slice(0, 4).map((doc) => `<span>${escapeHtml(doc.file_path || "未知文档")}</span>`).join("")}
+                  </div>
+                  ${group.status_message ? `<span class="classification-note">${escapeHtml(group.status_message)}</span>` : ''}
+                </label>
+                <div class="kb-card-actions">
+                  ${group.graph_url
+                    ? `<a class="button ghost kb-graph-link" href="${escapeHtml(group.graph_url)}" target="_blank" rel="noopener noreferrer">查看该知识库的知识图谱</a>`
+                    : '<span class="kb-graph-unavailable">LightRAG 图谱地址未配置</span>'}
+                  ${group.isolation === "migration_required"
+                    ? `<button class="button ghost kb-bind-instance" type="button" data-kb-id="${escapeHtml(group.id)}">绑定独立实例</button>`
+                    : ""}
+                  ${group.managed
+                    ? `<button class="button danger kb-delete-instance" type="button" data-kb-id="${escapeHtml(group.id)}" data-kb-name="${escapeHtml(group.name)}">删除该知识库</button>`
+                    : ""}
                 </div>
-                <p>${escapeHtml(group.description || "")}</p>
-                <div class="kb-stats">
-                  <span>${group.node_count || 0} 节点</span>
-                  <span>${group.edge_count || 0} 关系</span>
-                </div>
-                <div class="material-source-list">
-                  ${(group.documents || []).slice(0, 4).map((doc) => `<span>${escapeHtml(doc.file_path || "未知文档")}</span>`).join("")}
-                </div>
-                ${knowledgeBaseMiniGraph(group.graph)}
-              </label>
+              </article>
             `).join("")}
           </div>
         `;
         knowledgeBasesEl.querySelectorAll('input[name="knowledgeBaseId"]').forEach((input) => {
           input.addEventListener("change", () => selectKnowledgeScope(input.value));
         });
-        renderKnowledgeGraph(selected?.graph || fullGraph);
+        knowledgeBasesEl.querySelectorAll(".kb-bind-instance").forEach((button) => {
+          button.addEventListener("click", () => bindKnowledgeBaseInstance(button.dataset.kbId));
+        });
+        knowledgeBasesEl.querySelectorAll(".kb-delete-instance").forEach((button) => {
+          button.addEventListener("click", () => deleteManagedKnowledgeBase(button.dataset.kbId, button.dataset.kbName));
+        });
+      }
+
+      async function deleteManagedKnowledgeBase(id, name) {
+        const confirmation = window.prompt(`该操作会停止“${name}”的独立实例。请输入完整知识库名称确认：`);
+        if (confirmation !== name) return;
+        showMessage(`正在删除“${name}”。服务器会保留数据目录供管理员恢复。`, "info");
+        try {
+          const response = await fetch(`/api/knowledge/bases/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm_name: confirmation })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "删除失败");
+          selectedKnowledgeBaseId = "all";
+          showMessage(`“${name}”已删除，服务器数据目录已保留。`, "success");
+          await loadKnowledge();
+        } catch (error) {
+          showMessage(`删除失败：${error.message || error}`, "danger");
+        }
+      }
+
+      async function bindKnowledgeBaseInstance(id) {
+        const baseUrl = window.prompt("请输入该知识库独立的 LightRAG API 地址，例如 http://server:9622");
+        if (!baseUrl) return;
+        showMessage("正在验证并绑定独立知识库实例。", "info");
+        try {
+          const res = await fetch(`/api/knowledge/bases/${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ base_url: baseUrl.trim() })
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "绑定失败");
+          showMessage("独立实例绑定成功。请把属于该库的素材重新上传到该实例。", "success");
+          await loadKnowledge();
+        } catch (err) {
+          showMessage(`绑定失败：${err}`, "danger");
+        }
+      }
+
+      function updateKnowledgeBaseCatalog(rows) {
+        knowledgeBaseCatalog = (rows || []).filter((item) => item && item.id && item.id !== "unassigned" && item.selectable !== false);
+        const select = document.getElementById("uploadKnowledgeBaseId");
+        const previous = select.value;
+        select.innerHTML = knowledgeBaseCatalog.map((item) =>
+          `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.id)}</option>`
+        ).join("");
+        if (knowledgeBaseCatalog.some((item) => item.id === previous)) select.value = previous;
+        updateUploadDestinationState();
+      }
+
+      function updateUploadDestinationState() {
+        const mode = document.querySelector('input[name="knowledgeBaseMode"]:checked')?.value || "existing";
+        const hasExisting = knowledgeBaseCatalog.length > 0;
+        if (mode === "existing" && !hasExisting) {
+          document.querySelector('input[name="knowledgeBaseMode"][value="new"]').checked = true;
+        }
+        const currentMode = document.querySelector('input[name="knowledgeBaseMode"]:checked')?.value || "new";
+        document.getElementById("existingKnowledgeBaseField").classList.toggle("hidden", currentMode !== "existing");
+        document.getElementById("newKnowledgeBaseFields").classList.toggle("hidden", currentMode !== "new");
+        updateProvisioningUi();
+      }
+
+      function updateProvisioningUi() {
+        const manualField = document.getElementById("manualKnowledgeBaseUrlField");
+        const note = document.getElementById("kbProvisioningNote");
+        const automatic = Boolean(kbManager?.available);
+        manualField.classList.toggle("hidden", automatic);
+        note.textContent = automatic
+          ? "新建时会自动创建独立 LightRAG 实例、存储目录和知识图谱，无需填写端口。"
+          : `${kbManager?.message || "自动管理服务未配置。"} 管理员仍可填写已部署的独立 LightRAG 地址。`;
       }
 
       function selectKnowledgeScope(id) {
@@ -386,10 +524,8 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
           const input = card.querySelector('input[name="knowledgeBaseId"]');
           card.classList.toggle("selected", input?.value === selectedKnowledgeBaseId);
         });
-        const selected = knowledgeScopeOptions.find((item) => item.id === selectedKnowledgeBaseId) || knowledgeScopeOptions[0];
-        graphMemory.positions = new Map();
-        graphMemory.nodeIds = new Set();
-        renderKnowledgeGraph(selected?.graph);
+        renderDocumentsForScope();
+        bindDocumentCheckboxes();
       }
 
       function knowledgeBaseMiniGraph(graph) {
@@ -640,15 +776,43 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
 
         const form = new FormData();
         form.append("file", input.files[0]);
+        const mode = document.querySelector('input[name="knowledgeBaseMode"]:checked')?.value || "";
+        form.append("knowledge_base_mode", mode);
+        if (mode === "existing") {
+          const targetId = document.getElementById("uploadKnowledgeBaseId").value;
+          if (!targetId) {
+            showMessage("请选择素材要存入的知识库。", "danger");
+            return;
+          }
+          form.append("knowledge_base_id", targetId);
+        } else {
+          const name = document.getElementById("newKnowledgeBaseName").value.trim();
+          if (!name) {
+            showMessage("请输入新知识库名称。", "danger");
+            return;
+          }
+          form.append("new_knowledge_base_name", name);
+          form.append("new_knowledge_base_description", document.getElementById("newKnowledgeBaseDescription").value.trim());
+          const baseUrl = document.getElementById("newKnowledgeBaseBaseUrl").value.trim();
+          if (!kbManager.available && !baseUrl) {
+            showMessage("请输入该知识库独立的 LightRAG API 地址。", "danger");
+            return;
+          }
+          if (baseUrl) form.append("new_knowledge_base_base_url", baseUrl);
+        }
         btn.disabled = true;
-        btn.textContent = "上传中";
-        showMessage("正在上传素材并触发 LightRAG 扫描。", "info");
+        btn.textContent = mode === "new" && kbManager.available ? "正在创建知识库" : "上传中";
+        showMessage(mode === "new" && kbManager.available ? "正在创建独立知识库实例，完成后将自动上传素材。" : "正在上传素材并触发 LightRAG 扫描。", "info");
         try {
           const res = await fetch("/api/knowledge/upload", { method: "POST", body: form });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || "上传失败");
           input.value = "";
-          showMessage(data.scan_error ? `上传成功，但扫描触发失败：${data.scan_error}` : "上传成功，LightRAG 已开始扫描处理。", data.scan_error ? "danger" : "success");
+          document.getElementById("newKnowledgeBaseName").value = "";
+          document.getElementById("newKnowledgeBaseDescription").value = "";
+          document.getElementById("newKnowledgeBaseBaseUrl").value = "";
+          const targetName = data.knowledge_base?.name || "所选知识库";
+          showMessage(data.scan_error ? `已存入“${targetName}”，但扫描触发失败：${data.scan_error}` : `上传成功，素材已分配到“${targetName}”。`, data.scan_error ? "danger" : "success");
           await loadKnowledge();
         } catch (err) {
           showMessage(`上传失败：${err}`, "danger");
@@ -665,7 +829,11 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
         btn.disabled = true;
         showMessage("正在清空知识库。", "info");
         try {
-          const res = await fetch("/api/knowledge", { method: "DELETE" });
+          const res = await fetch("/api/knowledge", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId || "all" })
+          });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || "清空失败");
           showMessage("知识库已清空。", "success");
@@ -691,7 +859,7 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
           const res = await fetch("/api/knowledge/documents", {
             method: "DELETE",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ doc_ids: docIds, delete_file: true })
+            body: JSON.stringify({ doc_ids: docIds, delete_file: true, knowledge_base_id: selectedKnowledgeBaseId || "all" })
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || "删除失败");
@@ -726,6 +894,9 @@ ${escapeHtml(node.summary || "")}${escapeHtml(sourceText)}</title>
       }
 
       document.getElementById("uploadForm").addEventListener("submit", uploadMaterial);
+      document.querySelectorAll('input[name="knowledgeBaseMode"]').forEach((input) => {
+        input.addEventListener("change", updateUploadDestinationState);
+      });
       deleteSelectedBtn.addEventListener("click", deleteSelectedDocuments);
       document.getElementById("clearBtn").addEventListener("click", clearKnowledge);
       document.getElementById("refreshBtn").addEventListener("click", loadKnowledge);

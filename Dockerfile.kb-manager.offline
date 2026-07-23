@@ -1,0 +1,17 @@
+FROM patent-agent:latest
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /service
+
+# The company server may not be able to reach Docker Hub or PyPI. Keep the
+# Docker SDK wheel next to this Dockerfile when using the offline build.
+COPY vendor/docker-*.whl /tmp/
+RUN python3 -m pip install --break-system-packages --no-cache-dir --no-deps /tmp/docker-*.whl \
+    && rm -f /tmp/docker-*.whl
+
+COPY kb_manager_service.py .
+
+EXPOSE 9700
+CMD ["python3", "kb_manager_service.py"]

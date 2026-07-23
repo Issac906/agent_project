@@ -366,3 +366,81 @@ outputs/result.md
 - 问题是否和知识库内容匹配；
 - `/query` 的 `mode`、`top_k` 等参数是否符合你的 LightRAG Server 版本；
 - `/query/data` 是否能返回原始检索片段。
+
+## 飞书机器人与自定义定时生成
+
+应用支持通过飞书企业自建应用机器人的长连接复用完整专利生成流程。网页端和飞书端使用同一个 Agent 状态机，因此飞书中的知识库选择、候选 idea、用户选择、章节全文、重写意见、最终文件和历史记录保持一致。
+
+飞书中的专利章节使用消息卡片展示。标题、列表和段落保留可读排版；LaTeX 公式与 Mermaid 附图会先转换为 PNG、上传飞书，再嵌入卡片，因此聊天窗口不会显示原始公式代码或 Mermaid 源码。
+
+## 物理隔离知识库
+
+“总知识库”继续使用 `LIGHTRAG_BASE_URL`。项目提供独立的知识库管理服务，用户在首页选择“新建知识库”并上传第一份素材后，服务会自动完成：
+
+- 分配独立 workspace 和端口；
+- 创建独立 `rag_storage` 与 `inputs` 目录；
+- 启动独立 LightRAG Docker 容器；
+- 等待健康检查通过并登记 API/图谱地址；
+- 将当前素材上传到新实例。
+
+管理服务只部署在公司服务器一次。准备配置：
+
+```bash
+cd deploy
+cp kb-manager.env.example kb-manager.env
+# 编辑 kb-manager.env，至少填写管理令牌、服务器地址和复用的 LightRAG 配置文件
+docker compose --env-file kb-manager.env -f docker-compose.kb-manager.yml up -d --build
+```
+
+`KB_MANAGER_LIGHTRAG_ENV_FILE` 指向一份经过验证的 LightRAG 环境文件，新实例会复用其中的 LLM、Embedding 和存储配置，但强制覆盖 `WORKSPACE`、`WORKING_DIR`、`INPUT_DIR`、`HOST` 与容器内端口。随后在 Patent Agent 的 `.env` 或“系统设置 → 知识库实例管理”中配置：
+
+```dotenv
+KB_MANAGER_URL=http://192.168.130.130:9700
+KB_MANAGER_API_KEY=<与管理服务一致的随机令牌>
+KB_MANAGER_TIMEOUT=240
+```
+
+素材上传、删除、查询、生成和“查看该知识库的知识图谱”都会只访问所选实例。删除由应用创建的知识库时，管理服务停止容器并移除登记，但默认保留数据目录，避免误删后无法恢复。旧版逻辑分组仍可由管理员手动绑定独立实例并迁移素材。
+
+管理服务需要访问 `/var/run/docker.sock`，因此必须只在受信任的公司服务器运行；`9700` 端口应通过防火墙限制为内网访问，并使用足够长的 `KB_MANAGER_API_KEY`。不要在桌面安装包中写死该令牌。
+
+如果公司服务器无法访问 Docker Hub 或 PyPI，可先在联网电脑执行
+`python -m pip download --no-deps docker==7.1.0 -d vendor`，再使用
+`Dockerfile.kb-manager.offline` 基于服务器已有的 `patent-agent:latest`
+镜像离线构建。`vendor/*.whl` 不提交到 Git。
+
+安装依赖后，在“系统设置 → 飞书机器人”中填写：
+
+- App ID（`cli_...`）
+- App Secret
+- 应用可访问地址（可选，用于在飞书中打开文件和历史记录）
+
+在飞书开放平台创建企业自建应用后，需要添加机器人能力，在“事件与回调”中选择长连接并订阅 `im.message.receive_v1`，开通读取私聊/群聊消息和以应用身份发消息的权限，然后发布应用并把测试用户加入可用范围。不要把 App Secret 写进代码或提交到 Git。
+
+群内可用指令：
+
+```text
+开始生成
+状态
+查看会话ID
+选择 2
+接受
+重写
+修改：请补充控制参数的边界条件
+结束并保存
+```
+
+候选 idea 和章节正文过长时会拆成多条连续聊天消息，但不会截断或用省略号代替。用户接受当前章节后，Agent 会自动生成并发送下一章。
+
+定时生成在系统设置中逐条配置，支持每天、工作日、每周、每月和任意五段 Cron 表达式。每条计划可以设置时区、群/用户目标、启动消息、知识库和创新档位。到点后系统按计划配置自动创建运行并推进到候选 idea，候选选择和后续章节仍由用户逐步确认。非计划时间内，用户也可以随时在飞书中发送“开始生成”启动完整交互流程。
+
+常用 Cron 示例：
+
+```text
+0 9 * * *    每天 09:00
+0 9 * * 1    每周一 09:00
+0 9 1 * *    每月 1 日 09:00
+0 9 * * 1-5  工作日 09:00
+```
+
+如果要让飞书消息中的下载链接可用，`FEISHU_PUBLIC_BASE_URL` 必须是飞书用户可访问的公司内网或公网地址，不能填只在应用本机有效的 `127.0.0.1`。

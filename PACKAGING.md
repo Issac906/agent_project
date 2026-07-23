@@ -1,6 +1,6 @@
 # 桌面应用打包说明
 
-## macOS dmg
+## macOS 安装包
 
 在 macOS 项目根目录执行：
 
@@ -13,14 +13,19 @@
 ```text
 dist/PatentAgent.app
 dist/PatentAgent-macOS.dmg
+dist/PatentAgent-macOS.pkg
 ```
 
 说明：
 
 - 安装包包含项目代码、前端页面、`skills/` 和注册 tools。
+- DMG 只包含桌面应用本体和“应用程序”快捷入口，不再重复放入一整套 MCP 可执行目录，因此体积更小。
+- PKG 使用 macOS 系统安装向导，用户会依次看到“继续、安装、完成”等标准步骤，最终安装到 `/Applications`。
 - 安装包不包含 `.env`、`outputs/` 或本机历史记录。
 - 用户运行后，在系统设置中填写自己的外部搜索 API 和 Pi Agent LLM 配置。
 - 用户配置保存到本机用户目录下的 `user_config.json`，不会写回项目 `.env`。
+
+本地构建得到的是未公证安装包，适合内部测试。若要公开分发并避免 Gatekeeper 警告，还需要 Apple Developer ID 签名和 notarization。
 
 ## Windows exe
 
